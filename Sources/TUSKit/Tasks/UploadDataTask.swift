@@ -173,18 +173,21 @@ final class UploadDataTask: NSObject, IdentifiableTask {
     
     @available(iOS 11.0, macOS 10.13, *)
     func observeTask(task: URLSessionUploadTask, size: Int) {
-        let targetRange = 0..<size
+        // Wire progress through the URLSession delegate via TUSAPI's per-task progress callback
+        // registry. This works equally well for tasks created in this run (where the URLSession
+        // also fires `didSendBodyData` for them) and for tasks reconnected after a relaunch (where
+        // KVO on `task.progress` would not fire because TUSKit never gets a fresh handle on the
+        // reconnected task — only the URLSession's own delegate sees their bytes-sent events).
+        observation = nil
         let uploaded = metaData.uploadedRange?.count ?? 0
-        
-        observation = task.progress.observe(\.fractionCompleted) { [weak self] progress, _ in
-            guard let self = self else { return }
+        let identifier = metaData.id.uuidString
+        api.registerProgressCallback({ [weak self] totalBytesSent, _ in
+            guard let self else { return }
             self.queue.async {
-                guard progress.fractionCompleted <= 1 else { return }
-                let bytes = progress.fractionCompleted * Double(targetRange.count)
-                let totalUploaded = uploaded + Int(bytes)
+                let totalUploaded = uploaded + Int(totalBytesSent)
                 self.progressDelegate?.progressUpdatedFor(metaData: self.metaData, totalUploadedBytes: totalUploaded)
             }
-        }
+        }, forIdentifier: identifier)
     }
     
     func prepareUploadFile() throws -> URL {

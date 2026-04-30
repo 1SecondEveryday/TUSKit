@@ -546,7 +546,7 @@ public final class TUSClient {
         guard let allMetadata = try? files.loadAllMetadata() else {
             return
         }
-        
+
         for metadata in allMetadata {
             api.checkTaskExists(for: metadata) { [weak self] taskExists in
                 guard let self else {
@@ -556,7 +556,22 @@ public final class TUSClient {
                       let task = try? UploadDataTask(api: self.api, metaData: metadata, files: self.files, headerGenerator: self.headerGenerator) else {
                     return
                 }
-                
+
+                // Re-attach progress reporting to the reconnected URLSession task. Without this,
+                // tasks already in flight when the app was terminated never fire progress events
+                // again — only `didFinishUpload` at the very end. We don't get a fresh handle on
+                // the reconnected URLSessionUploadTask, so KVO doesn't apply; the only path that
+                // fires for these tasks is the URLSession delegate's `didSendBodyData`, which
+                // TUSAPI now routes to per-task progress callbacks.
+                task.progressDelegate = self
+                let uploaded = metadata.uploadedRange?.count ?? 0
+                let identifier = metadata.id.uuidString
+                self.api.registerProgressCallback({ [weak self] totalBytesSent, _ in
+                    guard let self else { return }
+                    let totalUploaded = uploaded + Int(totalBytesSent)
+                    self.progressUpdatedFor(metaData: metadata, totalUploadedBytes: totalUploaded)
+                }, forIdentifier: identifier)
+
                 self.api.registerCallback({ result in
                     task.taskCompleted(result: result, completed: { [weak self] result in
                         if case .failure = result {
