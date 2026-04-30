@@ -23,11 +23,10 @@ final class UploadDataTask: NSObject, IdentifiableTask {
     let queue = DispatchQueue(label: "com.tuskit.uploadDataTask")
     
     private var isCanceled = false
-    
+
     private let api: TUSAPI
     private let files: Files
     private let range: Range<Int>?
-    private var observation: NSKeyValueObservation?
     private weak var sessionTask: URLSessionUploadTask?
     private let headerGenerator: HeaderGenerator
     
@@ -81,12 +80,8 @@ final class UploadDataTask: NSObject, IdentifiableTask {
                 return
             }
 
-            let dataSize: Int
             let file: URL
             do {
-                let attr = try FileManager.default.attributesOfItem(atPath: self.metaData.filePath.path)
-                dataSize = attr[FileAttributeKey.size] as! Int
-
                 file = try self.prepareUploadFile()
             } catch let error {
                 completed(Result.failure(TUSClientError.couldNotLoadData(underlyingError: error)))
@@ -110,7 +105,6 @@ final class UploadDataTask: NSObject, IdentifiableTask {
                         guard let self else { return }
 
                         self.queue.async {
-                            self.observation?.invalidate()
                             self.taskCompleted(result: result, completed: completed)
                         }
                     }
@@ -120,9 +114,7 @@ final class UploadDataTask: NSObject, IdentifiableTask {
 
                     self.sessionTask = task
 
-                    if #available(iOS 11.0, macOS 10.13, *) {
-                        self.observeTask(task: task, size: self.range?.count ?? dataSize)
-                    }
+                    self.observeProgress()
                 }
             }
         }
@@ -171,20 +163,19 @@ final class UploadDataTask: NSObject, IdentifiableTask {
         }
     }
     
-    @available(iOS 11.0, macOS 10.13, *)
-    func observeTask(task: URLSessionUploadTask, size: Int) {
-        let targetRange = 0..<size
+    func observeProgress() {
+        // KVO on task.progress doesn't fire for reconnected background tasks — URLSession never
+        // hands TUSKit a fresh handle on them. The delegate's didSendBodyData fires for both new
+        // and reconnected tasks, so we route progress through TUSAPI's callback registry instead.
         let uploaded = metaData.uploadedRange?.count ?? 0
-        
-        observation = task.progress.observe(\.fractionCompleted) { [weak self] progress, _ in
-            guard let self = self else { return }
+        let identifier = metaData.id.uuidString
+        api.registerProgressCallback({ [weak self] totalBytesSent, _ in
+            guard let self else { return }
             self.queue.async {
-                guard progress.fractionCompleted <= 1 else { return }
-                let bytes = progress.fractionCompleted * Double(targetRange.count)
-                let totalUploaded = uploaded + Int(bytes)
+                let totalUploaded = uploaded + Int(totalBytesSent)
                 self.progressDelegate?.progressUpdatedFor(metaData: self.metaData, totalUploadedBytes: totalUploaded)
             }
-        }
+        }, forIdentifier: identifier)
     }
     
     func prepareUploadFile() throws -> URL {
@@ -232,12 +223,7 @@ final class UploadDataTask: NSObject, IdentifiableTask {
     func cancel() {
         queue.async {
             self.isCanceled = true
-            self.observation?.invalidate()
             self.sessionTask?.cancel()
         }
-    }
-    
-    deinit {
-        observation?.invalidate()
     }
 }

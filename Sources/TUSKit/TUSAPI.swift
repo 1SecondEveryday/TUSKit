@@ -355,25 +355,11 @@ final class TUSAPI {
         return task
     }
     
-    func registerCallback(_ completion: @escaping (Result<Int, TUSAPIError>) -> Void, forMetadata metadata: UploadMetadata) {
-        queue.sync {
-            self.callbacks[metadata.id.uuidString] = { result in
-                processResult(completion: completion) {
-                    let (data, response) = try result.get()
-                    guard let offsetStr = response.allHeaderFields[caseInsensitive: "upload-offset"] as? String,
-                          let offset = Int(offsetStr) else {
-                        throw TUSAPIError.couldNotRetrieveOffset
-                    }
-                    return offset
-                }
-            }
-        }
-    }
-    
-    func registerProgressCallback(
-        _ progress: @escaping (_ totalBytesSent: Int64, _ totalBytesExpectedToSend: Int64) -> Void,
-        forIdentifier identifier: String
-    ) {
+    /// Register a per-task progress callback keyed by the task's identifier (which TUSKit always
+    /// sets to `metadata.id.uuidString`). Invoked from the URLSession delegate's
+    /// `didSendBodyData`, so it works equally well for tasks TUSKit creates this run and for
+    /// orphan tasks that the URLSession reconnects to across an app relaunch.
+    func registerProgressCallback(_ progress: @escaping (_ totalBytesSent: Int64, _ totalBytesExpectedToSend: Int64) -> Void, forIdentifier identifier: String) {
         queue.sync {
             self.progressCallbacks[identifier] = progress
         }
@@ -393,6 +379,21 @@ final class TUSAPI {
         progress?(totalBytesSent, totalBytesExpectedToSend)
     }
 
+    func registerCallback(_ completion: @escaping (Result<Int, TUSAPIError>) -> Void, forMetadata metadata: UploadMetadata) {
+        queue.sync {
+            self.callbacks[metadata.id.uuidString] = { result in
+                processResult(completion: completion) {
+                    let (data, response) = try result.get()
+                    guard let offsetStr = response.allHeaderFields[caseInsensitive: "upload-offset"] as? String,
+                          let offset = Int(offsetStr) else {
+                        throw TUSAPIError.couldNotRetrieveOffset
+                    }
+                    return offset
+                }
+            }
+        }
+    }
+    
     func registerBackgroundHandler(_ handler: @escaping () -> Void) {
         backgroundHandler = handler
     }
@@ -478,6 +479,10 @@ private extension TUSAPI {
             api.taskData[identifier, default: Data()].append(data)
         }
 
+        func urlSession(_ session: URLSession, task: URLSessionTask, didSendBodyData bytesSent: Int64, totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
+            api?.handleProgressForTask(task, totalBytesSent: totalBytesSent, totalBytesExpectedToSend: totalBytesExpectedToSend)
+        }
+
         func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
             api?.handleCompletionOfTask(task, withError: error)
         }
@@ -520,7 +525,9 @@ extension TUSAPI {
             completion(.success(success))
         }
     }
+}
 
+private extension TUSAPI {
     func handleFinishOfBackgroundURLSessionEvents() {
         if let backgroundHandler {
             DispatchQueue.main.async {

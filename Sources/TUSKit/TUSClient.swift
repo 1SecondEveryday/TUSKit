@@ -38,10 +38,8 @@ public protocol TUSClientDelegate: AnyObject {
     /// - Important: The total is based on active uploads, so it will lower once files are uploaded. This is because it's ambiguous what the total is. E.g. You can be uploading 100 bytes, after 50 bytes are uploaded, let's say you add 150 more bytes, is the total then 250 or 200? And what if the upload is done, and you add 50 more. Is the total 50 or 300? or 250?
     ///
     /// As a rule of thumb: The total will be highest on the start, a good starting point is to compare the progress against that number.
-    @available(iOS 11.0, macOS 10.13, watchOS 6.0, *)
     func totalProgress(bytesUploaded: Int, totalBytes: Int, client: TUSClient)
-    
-    @available(iOS 11.0, macOS 10.13, watchOS 6.0, *)
+
     /// Get the progress of a specific upload by id. The id is given when adding an upload and methods of this delegate.
     func progressFor(id: UUID, context: [String: String]?, bytesUploaded: Int, totalBytes: Int, client: TUSClient)
 }
@@ -57,7 +55,6 @@ public extension TUSClientDelegate {
 }
 
 protocol ProgressDelegate: AnyObject {
-    @available(iOS 11.0, macOS 10.13, watchOS 6.0, *)
     func progressUpdatedFor(metaData: UploadMetadata, totalUploadedBytes: Int)
 }
 
@@ -546,7 +543,7 @@ public final class TUSClient {
         guard let allMetadata = try? files.loadAllMetadata() else {
             return
         }
-        
+
         for metadata in allMetadata {
             api.checkTaskExists(for: metadata) { [weak self] taskExists in
                 guard let self else {
@@ -556,7 +553,19 @@ public final class TUSClient {
                       let task = try? UploadDataTask(api: self.api, metaData: metadata, files: self.files, headerGenerator: self.headerGenerator) else {
                     return
                 }
-                
+
+                // Re-attach progress for tasks reconnected after a relaunch. KVO on the
+                // URLSessionUploadTask isn't an option since we never get a fresh handle on
+                // those tasks; only the URLSession delegate sees their bytes-sent events.
+                task.progressDelegate = self
+                let uploaded = metadata.uploadedRange?.count ?? 0
+                let identifier = metadata.id.uuidString
+                self.api.registerProgressCallback({ [weak self] totalBytesSent, _ in
+                    guard let self else { return }
+                    let totalUploaded = uploaded + Int(totalBytesSent)
+                    self.progressUpdatedFor(metaData: metadata, totalUploadedBytes: totalUploaded)
+                }, forIdentifier: identifier)
+
                 self.api.registerCallback({ result in
                     task.taskCompleted(result: result, completed: { [weak self] result in
                         if case .failure = result {
@@ -844,7 +853,6 @@ func taskFor(metaData: UploadMetadata, api: TUSAPI, files: Files, chunkSize: Int
 
 extension TUSClient: ProgressDelegate {
     
-    @available(iOS 11.0, macOS 10.13, watchOS 6.0, *)
     func progressUpdatedFor(metaData: UploadMetadata, totalUploadedBytes: Int) {
         reportingQueue.async {
             self.delegate?.progressFor(id: metaData.id, context: metaData.context, bytesUploaded: totalUploadedBytes, totalBytes: metaData.size, client: self)

@@ -1,10 +1,6 @@
 import XCTest
 @testable import TUSKit
 
-// These tests verify that progress is reported via the URLSession delegate path
-// (TUSAPI.handleProgressForTask) rather than KVO, so that reconnected background
-// tasks — which TUSKit never gets a fresh handle on — still fire progress events.
-
 final class TUSClient_ProgressTests: XCTestCase {
 
     var api: TUSAPI!
@@ -38,7 +34,7 @@ final class TUSClient_ProgressTests: XCTestCase {
         clearDirectory(dir: fullStoragePath)
     }
 
-    // MARK: - observeTask registers a progress callback
+    // MARK: - observeProgress registers a progress callback
 
     func testObserveTaskRegistersCallbackThatRoutesToProgressDelegate() throws {
         let id = UUID()
@@ -62,7 +58,7 @@ final class TUSClient_ProgressTests: XCTestCase {
         uploadTask.progressDelegate = mockDelegate
 
         if #available(iOS 11.0, macOS 10.13, *) {
-            uploadTask.observeTask(task: URLSessionUploadTask(), size: data.count)
+            uploadTask.observeProgress()
         } else {
             return
         }
@@ -103,7 +99,7 @@ final class TUSClient_ProgressTests: XCTestCase {
         uploadTask.progressDelegate = mockDelegate
 
         if #available(iOS 11.0, macOS 10.13, *) {
-            uploadTask.observeTask(task: URLSessionUploadTask(), size: data.count - alreadyUploaded)
+            uploadTask.observeProgress()
         } else {
             return
         }
@@ -115,7 +111,6 @@ final class TUSClient_ProgressTests: XCTestCase {
         uploadTask.queue.async { DispatchQueue.main.async { flush.fulfill() } }
         waitForExpectations(timeout: 1)
 
-        // Should report alreadyUploaded (5) + bytes sent this chunk (3) = 8
         XCTAssertEqual(mockDelegate.lastTotalUploaded, alreadyUploaded + 3)
     }
 
@@ -141,7 +136,7 @@ final class TUSClient_ProgressTests: XCTestCase {
         uploadTask.progressDelegate = mockDelegate
 
         if #available(iOS 11.0, macOS 10.13, *) {
-            uploadTask.observeTask(task: URLSessionUploadTask(), size: data.count)
+            uploadTask.observeProgress()
         } else {
             return
         }
