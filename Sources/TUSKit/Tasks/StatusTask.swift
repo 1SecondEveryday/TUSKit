@@ -16,7 +16,6 @@ final class StatusTask: IdentifiableTask {
         metaData.id
     }
     
-    weak var progressDelegate: ProgressDelegate?
     let api: TUSAPI
     let files: Files
     let remoteDestination: URL
@@ -57,7 +56,6 @@ final class StatusTask: IdentifiableTask {
                             let files = self.files
                             let chunkSize = self.chunkSize
                             let api = self.api
-                            let progressDelegate = self.progressDelegate
 
                             do {
                                 let status = try result.get()
@@ -92,7 +90,6 @@ final class StatusTask: IdentifiableTask {
                                     }
 
                                     let task = try UploadDataTask(api: api, metaData: metaData, files: files, range: nextRange, headerGenerator: self.headerGenerator)
-                                    task.progressDelegate = progressDelegate
                                     completed(.success([task]))
                                 }
                             } catch let error as TUSClientError {
