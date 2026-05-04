@@ -158,55 +158,55 @@ final class TUSAPITests: XCTestCase {
         XCTAssertEqual(String(length), headerFields["Content-Length"])
     }
     
-    // MARK: - Progress callbacks
+    // MARK: - Progress delegate
 
-    func testProgressCallbackFiredViaHandleProgressForTask() {
-        let identifier = UUID().uuidString
+    func testProgressDelegateFiredViaHandleProgressForTask() {
+        let id = UUID()
+        var receivedID: UUID?
         var receivedSent: Int64 = 0
         var receivedExpected: Int64 = 0
-        let callbackExpectation = expectation(description: "progress callback fires")
+        let delegateExpectation = expectation(description: "progress delegate fires")
 
-        api.registerProgressCallback({ sent, expected in
+        let mockDelegate = MockProgressDelegate { firedID, sent, expected in
+            receivedID = firedID
             receivedSent = sent
             receivedExpected = expected
-            callbackExpectation.fulfill()
-        }, forIdentifier: identifier)
+            delegateExpectation.fulfill()
+        }
+        api.progressDelegate = mockDelegate
 
-        let task = MockURLSessionTask(taskDescription: identifier)
+        let task = MockURLSessionTask(taskDescription: id.uuidString)
         api.handleProgressForTask(task, totalBytesSent: 512, totalBytesExpectedToSend: 1024)
 
         waitForExpectations(timeout: 1)
+        XCTAssertEqual(receivedID, id)
         XCTAssertEqual(receivedSent, 512)
         XCTAssertEqual(receivedExpected, 1024)
     }
 
-    func testProgressCallbackNotFiredAfterTaskCompletes() {
-        let identifier = UUID().uuidString
+    func testProgressDelegateNotCalledForNilTaskDescription() {
         var callCount = 0
+        let mockDelegate = MockProgressDelegate { _, _, _ in callCount += 1 }
+        api.progressDelegate = mockDelegate
 
-        api.registerProgressCallback({ _, _ in callCount += 1 }, forIdentifier: identifier)
-
-        let task = MockURLSessionTask(taskDescription: identifier)
-        api.handleCompletionOfTask(task, withError: nil)
+        let task = MockURLSessionTask(taskDescription: nil)
         api.handleProgressForTask(task, totalBytesSent: 512, totalBytesExpectedToSend: 1024)
 
-        let flush = expectation(description: "flush internal queues")
+        let flush = expectation(description: "flush")
         DispatchQueue.main.async { flush.fulfill() }
         waitForExpectations(timeout: 1)
-        XCTAssertEqual(callCount, 0, "progress callback should be cleaned up when the task completes")
+        XCTAssertEqual(callCount, 0)
     }
 
-    func testProgressCallbackRemovedExplicitly() {
-        let identifier = UUID().uuidString
+    func testProgressDelegateNotCalledForInvalidUUIDTaskDescription() {
         var callCount = 0
+        let mockDelegate = MockProgressDelegate { _, _, _ in callCount += 1 }
+        api.progressDelegate = mockDelegate
 
-        api.registerProgressCallback({ _, _ in callCount += 1 }, forIdentifier: identifier)
-        api.removeProgressCallback(forIdentifier: identifier)
-
-        let task = MockURLSessionTask(taskDescription: identifier)
+        let task = MockURLSessionTask(taskDescription: "not-a-uuid")
         api.handleProgressForTask(task, totalBytesSent: 512, totalBytesExpectedToSend: 1024)
 
-        let flush = expectation(description: "flush internal queues")
+        let flush = expectation(description: "flush")
         DispatchQueue.main.async { flush.fulfill() }
         waitForExpectations(timeout: 1)
         XCTAssertEqual(callCount, 0)
@@ -244,5 +244,19 @@ final class TUSAPITests: XCTestCase {
         XCTAssertEqual(String(offset), headerFields["Upload-Offset"])
         XCTAssertEqual(String(length), headerFields["Content-Length"])
     }
-    
+
+}
+
+// MARK: - Helpers
+
+private final class MockProgressDelegate: ProgressDelegate {
+    private let handler: (UUID, Int64, Int64) -> Void
+
+    init(_ handler: @escaping (UUID, Int64, Int64) -> Void) {
+        self.handler = handler
+    }
+
+    func progressUpdated(forID id: UUID, totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
+        handler(id, totalBytesSent, totalBytesExpectedToSend)
+    }
 }

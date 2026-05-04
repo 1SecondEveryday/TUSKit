@@ -66,8 +66,8 @@ final class TUSAPI {
     private let queue = DispatchQueue(label: "com.tus.TUSAPI")
     private var backgroundHandler: (() -> Void)? = nil
     private var callbacks: [String: (Result<(Data?, HTTPURLResponse), Error>) -> Void] = [:]
-    private var progressCallbacks: [String: (_ totalBytesSent: Int64, _ totalBytesExpectedToSend: Int64) -> Void] = [:]
     private var taskData: [String: Data] = [:]
+    weak var progressDelegate: ProgressDelegate?
 
     deinit {
         if session.delegate is SessionDataDelegate {
@@ -355,28 +355,9 @@ final class TUSAPI {
         return task
     }
     
-    /// Register a per-task progress callback keyed by the task's identifier (which TUSKit always
-    /// sets to `metadata.id.uuidString`). Invoked from the URLSession delegate's
-    /// `didSendBodyData`, so it works equally well for tasks TUSKit creates this run and for
-    /// orphan tasks that the URLSession reconnects to across an app relaunch.
-    func registerProgressCallback(_ progress: @escaping (_ totalBytesSent: Int64, _ totalBytesExpectedToSend: Int64) -> Void, forIdentifier identifier: String) {
-        queue.sync {
-            self.progressCallbacks[identifier] = progress
-        }
-    }
-
-    func removeProgressCallback(forIdentifier identifier: String) {
-        queue.sync {
-            _ = self.progressCallbacks.removeValue(forKey: identifier)
-        }
-    }
-
     func handleProgressForTask(_ task: URLSessionTask, totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
-        let progress: ((Int64, Int64) -> Void)? = queue.sync {
-            guard let identifier = task.taskDescription else { return nil }
-            return progressCallbacks[identifier]
-        }
-        progress?(totalBytesSent, totalBytesExpectedToSend)
+        guard let identifier = task.taskDescription, let id = UUID(uuidString: identifier) else { return }
+        progressDelegate?.progressUpdated(forID: id, totalBytesSent: totalBytesSent, totalBytesExpectedToSend: totalBytesExpectedToSend)
     }
 
     func registerCallback(_ completion: @escaping (Result<Int, TUSAPIError>) -> Void, forMetadata metadata: UploadMetadata) {
@@ -502,7 +483,6 @@ extension TUSAPI {
 
             defer {
                 callbacks.removeValue(forKey: identifier)
-                progressCallbacks.removeValue(forKey: identifier)
                 taskData.removeValue(forKey: identifier)
             }
 

@@ -55,7 +55,7 @@ public extension TUSClientDelegate {
 }
 
 protocol ProgressDelegate: AnyObject {
-    func progressUpdatedFor(metaData: UploadMetadata, totalUploadedBytes: Int)
+    func progressUpdated(forID id: UUID, totalBytesSent: Int64, totalBytesExpectedToSend: Int64)
 }
 
 /// The TUSKit client.
@@ -86,9 +86,9 @@ public final class TUSClient {
     private let api: TUSAPI
     private let chunkSize: Int?
     /// Keep track of uploads and their id's
-    private var uploads = [UUID: UploadMetadata]()
+    var uploads = [UUID: UploadMetadata]()
     private let queue = DispatchQueue(label: "com.TUSKit.TUSClient")
-    private let reportingQueue: DispatchQueue
+    let reportingQueue: DispatchQueue
     private let headerGenerator: HeaderGenerator
 
     /// Initialize a TUSClient with support for background URLSessions and uploads
@@ -133,9 +133,10 @@ public final class TUSClient {
         self.reportingQueue = reportingQueue
         self.headerGenerator = HeaderGenerator(handler: generateHeaders)
         scheduler.delegate = self
+        self.api.progressDelegate = self
         reregisterCallbacks()
     }
-    
+
     /// Initialize a TUSClient
     /// - Parameters:
     ///   - server: The URL of the server where you want to upload to.
@@ -168,6 +169,7 @@ public final class TUSClient {
         self.reportingQueue = reportingQueue
         self.headerGenerator = HeaderGenerator(handler: generateHeaders)
         scheduler.delegate = self
+        self.api.progressDelegate = self
         removeFinishedUploads()
         reregisterCallbacks()
     }
@@ -206,10 +208,11 @@ public final class TUSClient {
         self.reportingQueue = reportingQueue
         self.headerGenerator = HeaderGenerator(handler: generateHeaders)
         scheduler.delegate = self
+        self.api.progressDelegate = self
         removeFinishedUploads()
         reregisterCallbacks()
     }
-    
+
     // MARK: - Starting and stopping
     
     /// Kick off the client to start uploading any locally stored files.
@@ -554,17 +557,7 @@ public final class TUSClient {
                     return
                 }
 
-                // Re-attach progress for tasks reconnected after a relaunch. KVO on the
-                // URLSessionUploadTask isn't an option since we never get a fresh handle on
-                // those tasks; only the URLSession delegate sees their bytes-sent events.
-                task.progressDelegate = self
-                let uploaded = metadata.uploadedRange?.count ?? 0
-                let identifier = metadata.id.uuidString
-                self.api.registerProgressCallback({ [weak self] totalBytesSent, _ in
-                    guard let self else { return }
-                    let totalUploaded = uploaded + Int(totalBytesSent)
-                    self.progressUpdatedFor(metaData: metadata, totalUploadedBytes: totalUploaded)
-                }, forIdentifier: identifier)
+                self.queue.sync { self.uploads[metadata.id] = metadata }
 
                 self.api.registerCallback({ result in
                     task.taskCompleted(result: result, completed: { [weak self] result in
@@ -614,7 +607,7 @@ public final class TUSClient {
             }
         }
         
-        guard let task = try taskFor(metaData: metaData, api: api, files: files, chunkSize: chunkSize, progressDelegate: self, headerGenerator: headerGenerator) else {
+        guard let task = try taskFor(metaData: metaData, api: api, files: files, chunkSize: chunkSize, headerGenerator: headerGenerator) else {
             assertionFailure("Could not find a task for metaData \(metaData)")
             return
         }
@@ -673,7 +666,7 @@ public final class TUSClient {
     /// Schedule a single task if needed. Will decide what task to schedule for the metaData.
     /// - Parameter metaData:The metaData the schedule.
     private func scheduleTask(for metaData: UploadMetadata) throws {
-        guard let task = try taskFor(metaData: metaData, api: api, files: files, chunkSize: chunkSize, progressDelegate: self, headerGenerator: headerGenerator) else {
+        guard let task = try taskFor(metaData: metaData, api: api, files: files, chunkSize: chunkSize, headerGenerator: headerGenerator) else {
             throw TUSClientError.uploadIsAlreadyFinished
         }
         queue.sync {
@@ -835,25 +828,30 @@ private extension String {
 /// Decide which task to create based on metaData.
 /// - Parameter metaData: The `UploadMetadata` for which to create a `Task`.
 /// - Returns: The task that has to be performed for the relevant metaData. Will return nil if metaData's file is already uploaded / finished. (no task needed).
-func taskFor(metaData: UploadMetadata, api: TUSAPI, files: Files, chunkSize: Int?, progressDelegate: ProgressDelegate? = nil, headerGenerator: HeaderGenerator) throws -> ScheduledTask? {
+func taskFor(metaData: UploadMetadata, api: TUSAPI, files: Files, chunkSize: Int?, headerGenerator: HeaderGenerator) throws -> ScheduledTask? {
     guard !metaData.isFinished else {
         return nil
     }
-    
+
     if let remoteDestination = metaData.remoteDestination {
-        let statusTask = StatusTask(api: api, remoteDestination: remoteDestination, metaData: metaData, files: files, chunkSize: chunkSize, headerGenerator: headerGenerator)
-        statusTask.progressDelegate = progressDelegate
-        return statusTask
+        return StatusTask(api: api, remoteDestination: remoteDestination, metaData: metaData, files: files, chunkSize: chunkSize, headerGenerator: headerGenerator)
     } else {
-        let creationTask = try CreationTask(metaData: metaData, api: api, files: files, chunkSize: chunkSize, headerGenerator: headerGenerator)
-        creationTask.progressDelegate = progressDelegate
-        return creationTask
+        return try CreationTask(metaData: metaData, api: api, files: files, chunkSize: chunkSize, headerGenerator: headerGenerator)
     }
 }
 
 extension TUSClient: ProgressDelegate {
-    
-    func progressUpdatedFor(metaData: UploadMetadata, totalUploadedBytes: Int) {
+
+    func progressUpdated(forID id: UUID, totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
+        var metaData: UploadMetadata?
+        queue.sync {
+            metaData = self.uploads[id]
+        }
+        guard let metaData else { return }
+
+        let alreadyUploaded = metaData.uploadedRange?.count ?? 0
+        let totalUploadedBytes = alreadyUploaded + Int(totalBytesSent)
+
         reportingQueue.async {
             self.delegate?.progressFor(id: metaData.id, context: metaData.context, bytesUploaded: totalUploadedBytes, totalBytes: metaData.size, client: self)
         }
@@ -866,10 +864,7 @@ extension TUSClient: ProgressDelegate {
             uploadsCopy = self.uploads
         }
         for (_, metaDataForTotal) in uploadsCopy {
-            guard metaDataForTotal.id != metaData.id else {
-                continue
-            }
-
+            guard metaDataForTotal.id != id else { continue }
             totalBytesUploaded += metaDataForTotal.uploadedRange?.count ?? 0
             totalSize += metaDataForTotal.size
         }

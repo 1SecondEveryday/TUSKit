@@ -17,7 +17,6 @@ final class UploadDataTask: NSObject, IdentifiableTask {
         metaData.id
     }
     
-    weak var progressDelegate: ProgressDelegate?
     let metaData: UploadMetadata
     
     let queue = DispatchQueue(label: "com.tuskit.uploadDataTask")
@@ -113,8 +112,6 @@ final class UploadDataTask: NSObject, IdentifiableTask {
                     task.resume()
 
                     self.sessionTask = task
-
-                    self.observeProgress()
                 }
             }
         }
@@ -154,28 +151,12 @@ final class UploadDataTask: NSObject, IdentifiableTask {
             }
 
             let task = try UploadDataTask(api: api, metaData: metaData, files: files, range: nextRange, headerGenerator: headerGenerator)
-            task.progressDelegate = progressDelegate
             completed(.success([task]))
         } catch let error as TUSClientError {
             completed(.failure(error))
         } catch {
             completed(.failure(TUSClientError.couldNotUploadFile(underlyingError: error)))
         }
-    }
-    
-    func observeProgress() {
-        // KVO on task.progress doesn't fire for reconnected background tasks — URLSession never
-        // hands TUSKit a fresh handle on them. The delegate's didSendBodyData fires for both new
-        // and reconnected tasks, so we route progress through TUSAPI's callback registry instead.
-        let uploaded = metaData.uploadedRange?.count ?? 0
-        let identifier = metaData.id.uuidString
-        api.registerProgressCallback({ [weak self] totalBytesSent, _ in
-            guard let self else { return }
-            self.queue.async {
-                let totalUploaded = uploaded + Int(totalBytesSent)
-                self.progressDelegate?.progressUpdatedFor(metaData: self.metaData, totalUploadedBytes: totalUploaded)
-            }
-        }, forIdentifier: identifier)
     }
     
     func prepareUploadFile() throws -> URL {

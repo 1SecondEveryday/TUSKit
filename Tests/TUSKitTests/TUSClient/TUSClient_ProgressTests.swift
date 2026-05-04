@@ -34,132 +34,51 @@ final class TUSClient_ProgressTests: XCTestCase {
         clearDirectory(dir: fullStoragePath)
     }
 
-    // MARK: - observeProgress registers a progress callback
-
-    func testObserveTaskRegistersCallbackThatRoutesToProgressDelegate() throws {
+    func testProgressRoutedToProgressDelegate() {
         let id = UUID()
-        let filePath = try files.store(data: data, id: id)
-        let metaData = UploadMetadata(
-            id: id,
-            filePath: filePath,
-            uploadURL: URL(string: "https://tus.example.net/files")!,
-            size: data.count
-        )
-        metaData.remoteDestination = URL(string: "https://tus.example.net/files/\(id.uuidString)")!
-
-        let uploadTask = try UploadDataTask(
-            api: api,
-            metaData: metaData,
-            files: files,
-            headerGenerator: HeaderGenerator(handler: nil)
-        )
-
         let mockDelegate = MockProgressDelegate()
-        uploadTask.progressDelegate = mockDelegate
+        api.progressDelegate = mockDelegate
 
-        if #available(iOS 11.0, macOS 10.13, *) {
-            uploadTask.observeProgress()
-        } else {
-            return
-        }
-
-        let mockTask = MockURLSessionTask(taskDescription: id.uuidString)
-        api.handleProgressForTask(mockTask, totalBytesSent: 8, totalBytesExpectedToSend: Int64(data.count))
+        let task = MockURLSessionTask(taskDescription: id.uuidString)
+        api.handleProgressForTask(task, totalBytesSent: 8, totalBytesExpectedToSend: Int64(data.count))
 
         let flush = expectation(description: "dispatch queue flushed")
-        uploadTask.queue.async { DispatchQueue.main.async { flush.fulfill() } }
+        DispatchQueue.main.async { flush.fulfill() }
         waitForExpectations(timeout: 1)
 
-        XCTAssertEqual(mockDelegate.lastTotalUploaded, 8)
-        XCTAssertEqual(mockDelegate.lastMetaData?.id, id)
+        XCTAssertEqual(mockDelegate.lastID, id)
+        XCTAssertEqual(mockDelegate.lastTotalBytesSent, 8)
     }
 
-    func testObserveTaskOffsetIncludesAlreadyUploadedBytes() throws {
-        let id = UUID()
-        let filePath = try files.store(data: data, id: id)
-        let alreadyUploaded = 5
-        let metaData = UploadMetadata(
-            id: id,
-            filePath: filePath,
-            uploadURL: URL(string: "https://tus.example.net/files")!,
-            size: data.count
-        )
-        metaData.remoteDestination = URL(string: "https://tus.example.net/files/\(id.uuidString)")!
-        metaData.uploadedRange = 0..<alreadyUploaded
-
-        let uploadTask = try UploadDataTask(
-            api: api,
-            metaData: metaData,
-            files: files,
-            range: alreadyUploaded..<data.count,
-            headerGenerator: HeaderGenerator(handler: nil)
-        )
-
+    func testProgressForwardedForEachValidUUID() {
+        let id1 = UUID()
+        let id2 = UUID()
         let mockDelegate = MockProgressDelegate()
-        uploadTask.progressDelegate = mockDelegate
+        api.progressDelegate = mockDelegate
 
-        if #available(iOS 11.0, macOS 10.13, *) {
-            uploadTask.observeProgress()
-        } else {
-            return
-        }
+        let task1 = MockURLSessionTask(taskDescription: id1.uuidString)
+        api.handleProgressForTask(task1, totalBytesSent: 3, totalBytesExpectedToSend: Int64(data.count))
 
-        let mockTask = MockURLSessionTask(taskDescription: id.uuidString)
-        api.handleProgressForTask(mockTask, totalBytesSent: 3, totalBytesExpectedToSend: Int64(data.count - alreadyUploaded))
+        let task2 = MockURLSessionTask(taskDescription: id2.uuidString)
+        api.handleProgressForTask(task2, totalBytesSent: 7, totalBytesExpectedToSend: Int64(data.count))
 
         let flush = expectation(description: "dispatch queue flushed")
-        uploadTask.queue.async { DispatchQueue.main.async { flush.fulfill() } }
+        DispatchQueue.main.async { flush.fulfill() }
         waitForExpectations(timeout: 1)
 
-        XCTAssertEqual(mockDelegate.lastTotalUploaded, alreadyUploaded + 3)
-    }
-
-    func testProgressCallbackNotFiredForDifferentTaskIdentifier() throws {
-        let id = UUID()
-        let filePath = try files.store(data: data, id: id)
-        let metaData = UploadMetadata(
-            id: id,
-            filePath: filePath,
-            uploadURL: URL(string: "https://tus.example.net/files")!,
-            size: data.count
-        )
-        metaData.remoteDestination = URL(string: "https://tus.example.net/files/\(id.uuidString)")!
-
-        let uploadTask = try UploadDataTask(
-            api: api,
-            metaData: metaData,
-            files: files,
-            headerGenerator: HeaderGenerator(handler: nil)
-        )
-
-        let mockDelegate = MockProgressDelegate()
-        uploadTask.progressDelegate = mockDelegate
-
-        if #available(iOS 11.0, macOS 10.13, *) {
-            uploadTask.observeProgress()
-        } else {
-            return
-        }
-
-        let unrelatedTask = MockURLSessionTask(taskDescription: UUID().uuidString)
-        api.handleProgressForTask(unrelatedTask, totalBytesSent: 8, totalBytesExpectedToSend: Int64(data.count))
-
-        let flush = expectation(description: "dispatch queue flushed")
-        uploadTask.queue.async { DispatchQueue.main.async { flush.fulfill() } }
-        waitForExpectations(timeout: 1)
-
-        XCTAssertNil(mockDelegate.lastTotalUploaded, "Progress from an unrelated task should not reach this upload's delegate")
+        XCTAssertEqual(mockDelegate.lastID, id2)
+        XCTAssertEqual(mockDelegate.lastTotalBytesSent, 7)
     }
 }
 
 // MARK: - Helpers
 
 private final class MockProgressDelegate: ProgressDelegate {
-    var lastTotalUploaded: Int?
-    var lastMetaData: UploadMetadata?
+    var lastID: UUID?
+    var lastTotalBytesSent: Int64?
 
-    func progressUpdatedFor(metaData: UploadMetadata, totalUploadedBytes: Int) {
-        lastMetaData = metaData
-        lastTotalUploaded = totalUploadedBytes
+    func progressUpdated(forID id: UUID, totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
+        lastID = id
+        lastTotalBytesSent = totalBytesSent
     }
 }
