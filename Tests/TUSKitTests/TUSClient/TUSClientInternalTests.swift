@@ -146,6 +146,30 @@ final class TUSClientInternalTests: XCTestCase {
         XCTAssertTrue(resumed.isEmpty)
     }
     
+    func testProgressUpdatedIncludesAlreadyUploadedOffset() throws {
+        let id = UUID()
+        let filePath = try files.store(data: data, id: id)
+        let alreadyUploaded = 5
+        let metaData = UploadMetadata(
+            id: id,
+            filePath: filePath,
+            uploadURL: URL(string: "https://tus.example.net/files")!,
+            size: data.count,
+            customHeaders: [:],
+            mimeType: nil
+        )
+        metaData.uploadedRange = 0..<alreadyUploaded
+        client.uploads[id] = metaData
+
+        client.progressUpdated(forID: id, totalBytesSent: 3, totalBytesExpectedToSend: Int64(data.count - alreadyUploaded))
+
+        let flush = expectation(description: "reporting queue flushed")
+        client.reportingQueue.async { flush.fulfill() }
+        waitForExpectations(timeout: 1)
+
+        XCTAssertEqual(tusDelegate.progressPerId[id], alreadyUploaded + 3)
+    }
+
     func testCancellationDoesNotIncrementErrorCountOrRetry() throws {
         let metaData = try storeFiles()
         let creationTask = try CreationTask(metaData: metaData,

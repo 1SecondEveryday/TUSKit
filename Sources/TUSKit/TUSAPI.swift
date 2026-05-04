@@ -67,8 +67,11 @@ final class TUSAPI {
     private var backgroundHandler: (() -> Void)? = nil
     private var callbacks: [String: (Result<(Data?, HTTPURLResponse), Error>) -> Void] = [:]
     private var taskData: [String: Data] = [:]
+    private var progressObservations: [String: NSKeyValueObservation] = [:]
+    weak var progressDelegate: ProgressDelegate?
 
     deinit {
+        progressObservations.values.forEach { $0.invalidate() }
         if session.delegate is SessionDataDelegate {
             session.finishTasksAndInvalidate()
         }
@@ -285,6 +288,8 @@ final class TUSAPI {
         task.taskDescription = metaData.id.uuidString
         if #available(iOS 15.0, macOS 12, *), !session.configuration.sessionSendsLaunchEvents {
             task.delegate = sessionDelegate
+        } else if !(session.delegate is SessionDataDelegate) {
+            observeProgressForCompatibility(task: task, totalBytesExpectedToSend: Int64(data.count))
         }
         
         queue.sync {
@@ -336,12 +341,14 @@ final class TUSAPI {
         task.taskDescription = metaData.id.uuidString
         if #available(iOS 15.0, macOS 12, *), !session.configuration.sessionSendsLaunchEvents {
             task.delegate = sessionDelegate
+        } else if !(session.delegate is SessionDataDelegate) {
+            observeProgressForCompatibility(task: task, totalBytesExpectedToSend: Int64(length))
         }
         
         queue.sync {
             self.callbacks[metaData.id.uuidString] = { result in
                 processResult(completion: completion) {
-                    let (data, response) = try result.get()
+                    let (_, response) = try result.get()
                     guard let offsetStr = response.allHeaderFields[caseInsensitive: "upload-offset"] as? String,
                           let offset = Int(offsetStr) else {
                         throw TUSAPIError.couldNotRetrieveOffset
@@ -353,12 +360,30 @@ final class TUSAPI {
         task.resume()
         return task
     }
-    
+
+    func observeProgressForCompatibility(task: URLSessionTask, totalBytesExpectedToSend: Int64) {
+        guard let identifier = task.taskDescription else { return }
+
+        let observation = task.progress.observe(\.completedUnitCount) { [weak self, weak task] progress, _ in
+            guard let self, let task else { return }
+            self.handleProgressForTask(task, totalBytesSent: progress.completedUnitCount, totalBytesExpectedToSend: totalBytesExpectedToSend)
+        }
+
+        queue.sync {
+            progressObservations[identifier] = observation
+        }
+    }
+
+    func handleProgressForTask(_ task: URLSessionTask, totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
+        guard let identifier = task.taskDescription, let id = UUID(uuidString: identifier) else { return }
+        progressDelegate?.progressUpdated(forID: id, totalBytesSent: totalBytesSent, totalBytesExpectedToSend: totalBytesExpectedToSend)
+    }
+
     func registerCallback(_ completion: @escaping (Result<Int, TUSAPIError>) -> Void, forMetadata metadata: UploadMetadata) {
         queue.sync {
             self.callbacks[metadata.id.uuidString] = { result in
                 processResult(completion: completion) {
-                    let (data, response) = try result.get()
+                    let (_, response) = try result.get()
                     guard let offsetStr = response.allHeaderFields[caseInsensitive: "upload-offset"] as? String,
                           let offset = Int(offsetStr) else {
                         throw TUSAPIError.couldNotRetrieveOffset
@@ -442,7 +467,7 @@ extension Dictionary {
     }
 }
 
-private extension TUSAPI {
+extension TUSAPI {
     final class SessionDataDelegate: NSObject, URLSessionDataDelegate {
         weak var api: TUSAPI?
 
@@ -454,35 +479,40 @@ private extension TUSAPI {
             api.taskData[identifier, default: Data()].append(data)
         }
 
+        func urlSession(_ session: URLSession, task: URLSessionTask, didSendBodyData bytesSent: Int64, totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
+            api?.handleProgressForTask(task, totalBytesSent: totalBytesSent, totalBytesExpectedToSend: totalBytesExpectedToSend)
+        }
+
         func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
             api?.handleCompletionOfTask(task, withError: error)
         }
-        
+
         func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
             api?.handleFinishOfBackgroundURLSessionEvents()
         }
     }
-    
+
     func handleCompletionOfTask(_ task: URLSessionTask, withError error: Error?) {
         queue.sync {
             guard let identifier = task.taskDescription else {
                 return
             }
-            
+
             defer {
                 callbacks.removeValue(forKey: identifier)
                 taskData.removeValue(forKey: identifier)
+                progressObservations.removeValue(forKey: identifier)
             }
-            
+
             guard let completion = callbacks[identifier] else {
                 return
             }
-            
+
             if let error = error {
                 completion(.failure(TUSAPIError.underlyingError(error)))
                 return
             }
-            
+
             guard let response = task.response as? HTTPURLResponse else {
                 completion(.failure(TUSAPIError.underlyingError(NetworkError.noHTTPURLResponse)))
                 return
@@ -493,7 +523,7 @@ private extension TUSAPI {
             completion(.success(success))
         }
     }
-    
+
     func handleFinishOfBackgroundURLSessionEvents() {
         if let backgroundHandler {
             DispatchQueue.main.async {

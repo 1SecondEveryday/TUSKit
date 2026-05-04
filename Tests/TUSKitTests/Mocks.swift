@@ -72,6 +72,23 @@ final class TUSMockDelegate: TUSClientDelegate {
     }
 }
 
+/// A minimal URLSessionTask stub with a fixed taskDescription, used to drive TUSAPI's
+/// progress and completion routing in tests without a live URLSession.
+final class MockURLSessionTask: URLSessionTask, @unchecked Sendable {
+    private let _taskDescription: String?
+    override var taskDescription: String? {
+        get { _taskDescription }
+        set { }
+    }
+
+    init(taskDescription: String?) {
+        _taskDescription = taskDescription
+        // URLSessionTask.init() is deprecated in macOS 10.15 but there's no
+        // alternative designated initializer for subclassing in test code.
+        super.init()
+    }
+}
+
 typealias Headers = [String: String]?
 
 /// MockURLProtocol to support mocking the network

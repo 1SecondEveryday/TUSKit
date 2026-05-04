@@ -158,6 +158,87 @@ final class TUSAPITests: XCTestCase {
         XCTAssertEqual(String(length), headerFields["Content-Length"])
     }
     
+    // MARK: - Progress delegate
+
+    func testProgressDelegateFiredViaHandleProgressForTask() {
+        let id = UUID()
+        var receivedID: UUID?
+        var receivedSent: Int64 = 0
+        var receivedExpected: Int64 = 0
+        let delegateExpectation = expectation(description: "progress delegate fires")
+
+        let mockDelegate = MockProgressDelegate { firedID, sent, expected in
+            receivedID = firedID
+            receivedSent = sent
+            receivedExpected = expected
+            delegateExpectation.fulfill()
+        }
+        api.progressDelegate = mockDelegate
+
+        let task = MockURLSessionTask(taskDescription: id.uuidString)
+        api.handleProgressForTask(task, totalBytesSent: 512, totalBytesExpectedToSend: 1024)
+
+        waitForExpectations(timeout: 1)
+        XCTAssertEqual(receivedID, id)
+        XCTAssertEqual(receivedSent, 512)
+        XCTAssertEqual(receivedExpected, 1024)
+    }
+
+    func testCompatibilityProgressObservationRoutesProgressWhenDelegateCallbacksAreUnavailable() {
+        let id = UUID()
+        var receivedID: UUID?
+        var receivedSent: Int64 = 0
+        var receivedExpected: Int64 = 0
+        let delegateExpectation = expectation(description: "progress delegate fires")
+
+        let mockDelegate = MockProgressDelegate { firedID, sent, expected in
+            receivedID = firedID
+            receivedSent = sent
+            receivedExpected = expected
+            delegateExpectation.fulfill()
+        }
+        api.progressDelegate = mockDelegate
+
+        let task = MockURLSessionTask(taskDescription: id.uuidString)
+        api.observeProgressForCompatibility(task: task, totalBytesExpectedToSend: 1024)
+
+        task.progress.totalUnitCount = 1024
+        task.progress.completedUnitCount = 512
+
+        waitForExpectations(timeout: 1)
+        XCTAssertEqual(receivedID, id)
+        XCTAssertEqual(receivedSent, 512)
+        XCTAssertEqual(receivedExpected, 1024)
+    }
+
+    func testProgressDelegateNotCalledForNilTaskDescription() {
+        var callCount = 0
+        let mockDelegate = MockProgressDelegate { _, _, _ in callCount += 1 }
+        api.progressDelegate = mockDelegate
+
+        let task = MockURLSessionTask(taskDescription: nil)
+        api.handleProgressForTask(task, totalBytesSent: 512, totalBytesExpectedToSend: 1024)
+
+        let flush = expectation(description: "flush")
+        DispatchQueue.main.async { flush.fulfill() }
+        waitForExpectations(timeout: 1)
+        XCTAssertEqual(callCount, 0)
+    }
+
+    func testProgressDelegateNotCalledForInvalidUUIDTaskDescription() {
+        var callCount = 0
+        let mockDelegate = MockProgressDelegate { _, _, _ in callCount += 1 }
+        api.progressDelegate = mockDelegate
+
+        let task = MockURLSessionTask(taskDescription: "not-a-uuid")
+        api.handleProgressForTask(task, totalBytesSent: 512, totalBytesExpectedToSend: 1024)
+
+        let flush = expectation(description: "flush")
+        DispatchQueue.main.async { flush.fulfill() }
+        waitForExpectations(timeout: 1)
+        XCTAssertEqual(callCount, 0)
+    }
+
     func testUploadWithRelativePath() throws {
         let data = Data("Hello how are you".utf8)
         let baseURL = URL(string: "https://tus.example.org/files")!
@@ -190,5 +271,19 @@ final class TUSAPITests: XCTestCase {
         XCTAssertEqual(String(offset), headerFields["Upload-Offset"])
         XCTAssertEqual(String(length), headerFields["Content-Length"])
     }
-    
+
+}
+
+// MARK: - Helpers
+
+private final class MockProgressDelegate: ProgressDelegate {
+    private let handler: (UUID, Int64, Int64) -> Void
+
+    init(_ handler: @escaping (UUID, Int64, Int64) -> Void) {
+        self.handler = handler
+    }
+
+    func progressUpdated(forID id: UUID, totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
+        handler(id, totalBytesSent, totalBytesExpectedToSend)
+    }
 }
