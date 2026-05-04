@@ -66,6 +66,7 @@ final class TUSAPI {
     private let queue = DispatchQueue(label: "com.tus.TUSAPI")
     private var backgroundHandler: (() -> Void)? = nil
     private var callbacks: [String: (Result<(Data?, HTTPURLResponse), Error>) -> Void] = [:]
+    private var progressCallbacks: [String: (_ totalBytesSent: Int64, _ totalBytesExpectedToSend: Int64) -> Void] = [:]
     private var taskData: [String: Data] = [:]
 
     deinit {
@@ -369,6 +370,29 @@ final class TUSAPI {
         }
     }
     
+    func registerProgressCallback(
+        _ progress: @escaping (_ totalBytesSent: Int64, _ totalBytesExpectedToSend: Int64) -> Void,
+        forIdentifier identifier: String
+    ) {
+        queue.sync {
+            self.progressCallbacks[identifier] = progress
+        }
+    }
+
+    func removeProgressCallback(forIdentifier identifier: String) {
+        queue.sync {
+            _ = self.progressCallbacks.removeValue(forKey: identifier)
+        }
+    }
+
+    func handleProgressForTask(_ task: URLSessionTask, totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
+        let progress: ((Int64, Int64) -> Void)? = queue.sync {
+            guard let identifier = task.taskDescription else { return nil }
+            return progressCallbacks[identifier]
+        }
+        progress?(totalBytesSent, totalBytesExpectedToSend)
+    }
+
     func registerBackgroundHandler(_ handler: @escaping () -> Void) {
         backgroundHandler = handler
     }
@@ -457,32 +481,35 @@ private extension TUSAPI {
         func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
             api?.handleCompletionOfTask(task, withError: error)
         }
-        
+
         func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
             api?.handleFinishOfBackgroundURLSessionEvents()
         }
     }
-    
+}
+
+extension TUSAPI {
     func handleCompletionOfTask(_ task: URLSessionTask, withError error: Error?) {
         queue.sync {
             guard let identifier = task.taskDescription else {
                 return
             }
-            
+
             defer {
                 callbacks.removeValue(forKey: identifier)
+                progressCallbacks.removeValue(forKey: identifier)
                 taskData.removeValue(forKey: identifier)
             }
-            
+
             guard let completion = callbacks[identifier] else {
                 return
             }
-            
+
             if let error = error {
                 completion(.failure(TUSAPIError.underlyingError(error)))
                 return
             }
-            
+
             guard let response = task.response as? HTTPURLResponse else {
                 completion(.failure(TUSAPIError.underlyingError(NetworkError.noHTTPURLResponse)))
                 return
@@ -493,7 +520,7 @@ private extension TUSAPI {
             completion(.success(success))
         }
     }
-    
+
     func handleFinishOfBackgroundURLSessionEvents() {
         if let backgroundHandler {
             DispatchQueue.main.async {
