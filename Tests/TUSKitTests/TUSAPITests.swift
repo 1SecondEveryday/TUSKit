@@ -158,6 +158,60 @@ final class TUSAPITests: XCTestCase {
         XCTAssertEqual(String(length), headerFields["Content-Length"])
     }
     
+    // MARK: - Progress callbacks
+
+    func testProgressCallbackFiredViaHandleProgressForTask() {
+        let identifier = UUID().uuidString
+        var receivedSent: Int64 = 0
+        var receivedExpected: Int64 = 0
+        let callbackExpectation = expectation(description: "progress callback fires")
+
+        api.registerProgressCallback({ sent, expected in
+            receivedSent = sent
+            receivedExpected = expected
+            callbackExpectation.fulfill()
+        }, forIdentifier: identifier)
+
+        let task = MockURLSessionTask(taskDescription: identifier)
+        api.handleProgressForTask(task, totalBytesSent: 512, totalBytesExpectedToSend: 1024)
+
+        waitForExpectations(timeout: 1)
+        XCTAssertEqual(receivedSent, 512)
+        XCTAssertEqual(receivedExpected, 1024)
+    }
+
+    func testProgressCallbackNotFiredAfterTaskCompletes() {
+        let identifier = UUID().uuidString
+        var callCount = 0
+
+        api.registerProgressCallback({ _, _ in callCount += 1 }, forIdentifier: identifier)
+
+        let task = MockURLSessionTask(taskDescription: identifier)
+        api.handleCompletionOfTask(task, withError: nil)
+        api.handleProgressForTask(task, totalBytesSent: 512, totalBytesExpectedToSend: 1024)
+
+        let flush = expectation(description: "flush internal queues")
+        DispatchQueue.main.async { flush.fulfill() }
+        waitForExpectations(timeout: 1)
+        XCTAssertEqual(callCount, 0, "progress callback should be cleaned up when the task completes")
+    }
+
+    func testProgressCallbackRemovedExplicitly() {
+        let identifier = UUID().uuidString
+        var callCount = 0
+
+        api.registerProgressCallback({ _, _ in callCount += 1 }, forIdentifier: identifier)
+        api.removeProgressCallback(forIdentifier: identifier)
+
+        let task = MockURLSessionTask(taskDescription: identifier)
+        api.handleProgressForTask(task, totalBytesSent: 512, totalBytesExpectedToSend: 1024)
+
+        let flush = expectation(description: "flush internal queues")
+        DispatchQueue.main.async { flush.fulfill() }
+        waitForExpectations(timeout: 1)
+        XCTAssertEqual(callCount, 0)
+    }
+
     func testUploadWithRelativePath() throws {
         let data = Data("Hello how are you".utf8)
         let baseURL = URL(string: "https://tus.example.org/files")!
