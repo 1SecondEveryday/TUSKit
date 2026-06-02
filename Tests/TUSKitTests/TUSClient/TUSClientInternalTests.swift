@@ -187,4 +187,27 @@ final class TUSClientInternalTests: XCTestCase {
         XCTAssertEqual(metaData.errorCount, 0)
         XCTAssertTrue(scheduler.allTasks.isEmpty)
     }
+
+    func testLockedUploadIsNotRetriedImmediately() throws {
+        let metaData = try storeFiles()
+        metaData.remoteDestination = URL(string: "https://tus.example.com/files/\(metaData.id.uuidString)")!
+        metaData.queue.sync { }
+
+        let uploadTask = try UploadDataTask(api: TUSAPI(session: URLSession(configuration: .ephemeral)),
+                                            metaData: metaData,
+                                            files: files,
+                                            headerGenerator: HeaderGenerator(handler: nil))
+        let scheduler = Scheduler()
+        let response = try XCTUnwrap(HTTPURLResponse(url: metaData.remoteDestination!,
+                                                     statusCode: 423,
+                                                     httpVersion: nil,
+                                                     headerFields: nil))
+        let error = TUSClientError.couldNotUploadFile(underlyingError: TUSAPIError.failedRequest(response, nil))
+
+        client.onError(error: error, task: uploadTask, scheduler: scheduler)
+        scheduler.queue.sync { }
+
+        XCTAssertTrue(scheduler.allTasks.isEmpty)
+        XCTAssertEqual(metaData.errorCount, 1)
+    }
 }

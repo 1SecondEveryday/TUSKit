@@ -800,7 +800,12 @@ extension TUSClient: SchedulerDelegate {
         
         let canRetry = metaData.errorCount <= retryCount
         if canRetry {
-            scheduler.addTask(task: task)
+            let delay = retryDelay(for: error, errorCount: metaData.errorCount)
+            if delay > 0 {
+                scheduler.addTask(task: task, after: delay)
+            } else {
+                scheduler.addTask(task: task)
+            }
         } else { // Exhausted all retries, reporting back as failure.
             queue.sync {
                 self.uploads[metaData.id] = nil
@@ -809,6 +814,43 @@ extension TUSClient: SchedulerDelegate {
             reportingQueue.async {
                 self.delegate?.uploadFailed(id: metaData.id, error: error, context: metaData.context, client: self)
             }
+        }
+    }
+
+    private func retryDelay(for error: Error, errorCount: Int) -> TimeInterval {
+        guard let statusCode = failedRequestStatusCode(from: error),
+              statusCode == 409 || statusCode == 423 else {
+            return 0
+        }
+
+        let lockedUploadRetryDelays: [TimeInterval] = [3, 5]
+        let index = max(0, min(errorCount - 1, lockedUploadRetryDelays.count - 1))
+        return lockedUploadRetryDelays[index]
+    }
+
+    private func failedRequestStatusCode(from error: Error) -> Int? {
+        if let apiError = error as? TUSAPIError {
+            switch apiError {
+            case .failedRequest(let response, _):
+                return response.statusCode
+            case .underlyingError(let underlying):
+                return failedRequestStatusCode(from: underlying)
+            default:
+                return nil
+            }
+        }
+
+        guard let clientError = error as? TUSClientError else {
+            return nil
+        }
+
+        switch clientError {
+        case .couldNotCreateFileOnServer(let underlying),
+             .couldNotUploadFile(let underlying),
+             .couldNotGetFileStatus(let underlying):
+            return failedRequestStatusCode(from: underlying)
+        default:
+            return nil
         }
     }
 }

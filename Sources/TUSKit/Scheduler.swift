@@ -57,6 +57,13 @@ final class Scheduler {
             self.checkProcessNextTask()
         }
     }
+
+    func addTask(task: ScheduledTask, after delay: TimeInterval) {
+        queue.asyncAfter(deadline: .now() + delay) {
+            self.pendingTasks.append(task)
+            self.checkProcessNextTask()
+        }
+    }
     
     func cancelAll() {
         queue.async {
