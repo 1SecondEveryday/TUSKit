@@ -686,6 +686,17 @@ public final class TUSClient {
     
 }
 
+// MARK: - Retrying
+
+private extension TUSClient {
+    /// A failed PATCH may have stored some bytes or none, so retry by asking the server where to continue rather
+    /// than re-sending the same range: that would be rejected with 409 once the server has kept part of it.
+    func retryTask(after task: ScheduledTask, metaData: UploadMetadata) -> ScheduledTask {
+        guard task is UploadDataTask, let remoteDestination = metaData.remoteDestination else { return task }
+        return StatusTask(api: api, remoteDestination: remoteDestination, metaData: metaData, files: files, chunkSize: chunkSize, headerGenerator: headerGenerator)
+    }
+}
+
 extension TUSClient: SchedulerDelegate {
     func didFinishTask(task: ScheduledTask, scheduler: Scheduler) {
         switch task {
@@ -705,10 +716,17 @@ extension TUSClient: SchedulerDelegate {
     }
     
     func handleFinishedStatusTask(_ statusTask: StatusTask) {
-        statusTask.metaData.errorCount = 0 // We reset errorcounts after a succesful action.
-        if statusTask.metaData.isFinished {
-            _ = try? files.removeFileAndMetadata(statusTask.metaData) // If removing the file fails here, then it will be attempted again at next startup.
+        let metaData = statusTask.metaData
+        // A status check alone isn't progress: only reset when the server has more bytes than before, so a PATCH
+        // that keeps failing still runs out of retries, while a poor connection keeps going as long as it advances.
+        if statusTask.serverOffsetAdvanced {
+            metaData.errorCount = 0
         }
+        guard metaData.isFinished else { return }
+
+        _ = try? files.removeFileAndMetadata(metaData) // If removing the file fails here, then it will be attempted again at next startup.
+        // The server has every byte, e.g. the connection dropped before the final PATCH's response arrived.
+        didFinishUpload(id: metaData.id, url: statusTask.remoteDestination, context: metaData.context, client: self, responseHeaders: metaData.responseHeaders)
     }
     
     func handleFinishedUploadTask(_ uploadTask: UploadDataTask) {
@@ -813,7 +831,7 @@ extension TUSClient: SchedulerDelegate {
         
         let canRetry = metaData.errorCount <= retryCount
         if canRetry {
-            scheduler.addTask(task: task)
+            scheduler.addTask(task: retryTask(after: task, metaData: metaData))
         } else { // Exhausted all retries, reporting back as failure.
             queue.sync {
                 self.uploads[metaData.id] = nil

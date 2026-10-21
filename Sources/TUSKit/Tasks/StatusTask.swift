@@ -24,6 +24,13 @@ final class StatusTask: IdentifiableTask {
     private let headerGenerator: HeaderGenerator
     private var didCancel: Bool = false
     weak var sessionTask: URLSessionDataTask?
+    /// The offset the client knew before asking the server.
+    private var offsetBeforeStatus = 0
+
+    /// Whether the server reported more bytes than the client knew about, e.g. the part of an interrupted PATCH it kept.
+    var serverOffsetAdvanced: Bool {
+        (metaData.uploadedRange?.upperBound ?? 0) > offsetBeforeStatus
+    }
 
     private let queue = DispatchQueue(label: "com.tuskit.statustask")
 
@@ -40,6 +47,7 @@ final class StatusTask: IdentifiableTask {
         // Improvement: On failure, try uploading from the start. Create creationtask.
         queue.async {
             if self.didCancel { return }
+            self.offsetBeforeStatus = self.metaData.uploadedRange?.upperBound ?? 0
 
             self.headerGenerator.resolveHeaders(for: self.metaData) { [weak self] customHeaders in
                 guard let self else { return }

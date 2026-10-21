@@ -33,7 +33,8 @@ func clearDirectory(dir: URL) {
 func makeClient(storagePath: URL?,
                 supportedExtensions: [TUSProtocolExtension] = [.creation],
                 sessionIdentifier: String = "TEST",
-                mockTestID: String? = nil) -> TUSClient {
+                mockTestID: String? = nil,
+                chunkSize: Int = 500 * 1024) -> TUSClient {
     let liveDemoPath = URL(string: "https://tusd.tusdemo.net/files")!
     
     // We don't use a live URLSession, we mock it out.
@@ -49,6 +50,7 @@ func makeClient(storagePath: URL?,
                                    sessionIdentifier: sessionIdentifier,
                                    sessionConfiguration: configuration,
                                    storageDirectory: storagePath,
+                                   chunkSize: chunkSize,
                                    supportedExtensions: supportedExtensions)
         return client
     } catch {
