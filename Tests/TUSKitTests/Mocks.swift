@@ -111,6 +111,8 @@ final class MockURLProtocol: URLProtocol {
         let status: Int
         let headers: [String: String]
         let data: Data?
+        /// When set, the request fails with this error instead of returning a response.
+        var error: Error? = nil
     }
     
     private static var responses = [ResponseKey: (Headers) -> Response]()
@@ -211,6 +213,11 @@ final class MockURLProtocol: URLProtocol {
                 )
             )
             
+            if let error = preparedResponse.error {
+                client.urlProtocol(self, didFailWithError: error)
+                return
+            }
+
             let responseURL = self.request.url ?? URL(string: "https://tusd.tusdemo.net/files")!
             let response = HTTPURLResponse(url: responseURL, statusCode: preparedResponse.status, httpVersion: nil, headerFields: preparedResponse.headers)!
             
