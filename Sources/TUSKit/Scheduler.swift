@@ -30,6 +30,8 @@ final class Scheduler {
 
     private var pendingTasks = [ScheduledTask]()
     private var runningTasks = [ScheduledTask]()
+    /// Tasks waiting out a retry delay. Cancelling removes them here too, so a cancelled upload doesn't come back.
+    private var delayedTasks = [ScheduledTask]()
     weak var delegate: SchedulerDelegate?
     
     var allTasks: [ScheduledTask] {
@@ -57,10 +59,25 @@ final class Scheduler {
             self.checkProcessNextTask()
         }
     }
+
+    /// Add a task once `delay` has passed, unless it's cancelled before then.
+    func addTask(task: ScheduledTask, after delay: TimeInterval) {
+        queue.async {
+            self.delayedTasks.append(task)
+            self.queue.asyncAfter(deadline: .now() + delay) {
+                guard let index = self.delayedTasks.firstIndex(where: { $0 === task }) else { return }
+                self.delayedTasks.remove(at: index)
+                self.pendingTasks.append(task)
+                self.checkProcessNextTask()
+            }
+        }
+    }
     
     func cancelAll() {
         queue.async {
             self.pendingTasks = []
+            self.delayedTasks.forEach { $0.cancel() }
+            self.delayedTasks = []
             self.runningTasks.forEach { $0.cancel() }
             self.runningTasks = []
         }
@@ -69,6 +86,13 @@ final class Scheduler {
     func cancelTask(by id: UUID) {
         queue.async {
             self.pendingTasks.removeAll { task in
+                guard let idTask = task as? IdentifiableTask, idTask.id == id else {
+                    return false
+                }
+                idTask.cancel()
+                return true
+            }
+            self.delayedTasks.removeAll { task in
                 guard let idTask = task as? IdentifiableTask, idTask.id == id else {
                     return false
                 }
@@ -94,6 +118,11 @@ final class Scheduler {
                     let pendingTask = self.pendingTasks[pendingTaskIndex]
                     pendingTask.cancel()
                     self.pendingTasks.remove(at: pendingTaskIndex)
+                }
+
+                if let delayedTaskIndex = self.delayedTasks.firstIndex(where: { $0 === taskToCancel }) {
+                    self.delayedTasks[delayedTaskIndex].cancel()
+                    self.delayedTasks.remove(at: delayedTaskIndex)
                 }
 
                 if let runningTaskIndex = self.runningTasks.firstIndex(where: { runningTask in

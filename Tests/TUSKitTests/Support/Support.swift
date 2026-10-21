@@ -34,7 +34,8 @@ func makeClient(storagePath: URL?,
                 supportedExtensions: [TUSProtocolExtension] = [.creation],
                 sessionIdentifier: String = "TEST",
                 mockTestID: String? = nil,
-                chunkSize: Int = 500 * 1024) -> TUSClient {
+                chunkSize: Int = 500 * 1024,
+                retryPolicy: TUSRetryPolicy = .default) -> TUSClient {
     let liveDemoPath = URL(string: "https://tusd.tusdemo.net/files")!
     
     // We don't use a live URLSession, we mock it out.
@@ -51,7 +52,8 @@ func makeClient(storagePath: URL?,
                                    sessionConfiguration: configuration,
                                    storageDirectory: storagePath,
                                    chunkSize: chunkSize,
-                                   supportedExtensions: supportedExtensions)
+                                   supportedExtensions: supportedExtensions,
+                                   retryPolicy: retryPolicy)
         return client
     } catch {
         XCTFail("Could not create TUSClient instance \(error)")
