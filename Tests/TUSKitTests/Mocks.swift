@@ -113,6 +113,8 @@ final class MockURLProtocol: URLProtocol {
         let data: Data?
         /// When set, the request fails with this error instead of returning a response.
         var error: Error? = nil
+        /// How long to hold the response, e.g. to keep a request in flight while a test sets something up.
+        var delay: TimeInterval = 0
     }
     
     private static var responses = [ResponseKey: (Headers) -> Response]()
@@ -221,12 +223,14 @@ final class MockURLProtocol: URLProtocol {
             let responseURL = self.request.url ?? URL(string: "https://tusd.tusdemo.net/files")!
             let response = HTTPURLResponse(url: responseURL, statusCode: preparedResponse.status, httpVersion: nil, headerFields: preparedResponse.headers)!
             
-            client.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            
-            if let data = preparedResponse.data {
-                client.urlProtocol(self, didLoad: data)
+            type(of: self).queue.asyncAfter(deadline: .now() + preparedResponse.delay) {
+                client.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                
+                if let data = preparedResponse.data {
+                    client.urlProtocol(self, didLoad: data)
+                }
+                client.urlProtocolDidFinishLoading(self)
             }
-            client.urlProtocolDidFinishLoading(self)
         }
     }
     
