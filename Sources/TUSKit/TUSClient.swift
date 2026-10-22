@@ -562,7 +562,7 @@ public final class TUSClient {
                     return
                 }
                 guard taskExists,
-                      let task = try? UploadDataTask(api: self.api, metaData: metadata, files: self.files, headerGenerator: self.headerGenerator) else {
+                      let task = try? UploadDataTask(api: self.api, metaData: metadata, files: self.files, range: self.inFlightRange(for: metadata), headerGenerator: self.headerGenerator) else {
                     return
                 }
 
@@ -570,8 +570,14 @@ public final class TUSClient {
 
                 self.api.registerCallback({ result in
                     task.taskCompleted(result: result, completed: { [weak self] result in
-                        if case .failure = result {
-                            _ = try? self?.retry(id: metadata.id)
+                        guard let self else { return }
+                        switch result {
+                        case let .success(newTasks):
+                            // Handled like an upload the scheduler ran: report a finished upload, continue a chunked one.
+                            self.handleFinishedUploadTask(task)
+                            self.scheduler.addTasks(tasks: newTasks)
+                        case .failure:
+                            _ = try? self.retry(id: metadata.id)
                         }
                     })
                 }, forMetadata: metadata)
@@ -579,6 +585,14 @@ public final class TUSClient {
         }
     }
     
+    /// The chunk a background session was uploading for `metadata`, so the next chunk follows on from it.
+    /// Unchunked uploads have no range.
+    private func inFlightRange(for metadata: UploadMetadata) -> Range<Int>? {
+        let offset = metadata.uploadedRange?.upperBound ?? 0
+        guard let chunkSize, offset < metadata.size else { return nil }
+        return offset..<min(offset + chunkSize, metadata.size)
+    }
+
     /// Upload a file at the URL. Will not copy the path.
     /// - Parameter storedFilePath: The path where the file is stored for processing.
     private func scheduleTask(for storedFilePath: URL, id: UUID, uploadURL: URL?, customHeaders: [String: String], context: [String: String]?) throws {
