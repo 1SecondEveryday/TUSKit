@@ -80,14 +80,67 @@ final class TUSClient_ReattachTests: XCTestCase {
         tusDelegate.finishUploadExpectation = finished
         wait(for: [finished], timeout: 5)
 
-        let patchOffsets = MockURLProtocol.receivedRequests(testID: mockTestID)
-            .filter { $0.httpMethod == "PATCH" }
-            .compactMap { $0.value(forHTTPHeaderField: "Upload-Offset") }
-        XCTAssertEqual(patchOffsets, ["25", "50", "75"])
+        XCTAssertEqual(patchOffsets(), ["25", "50", "75"])
         XCTAssertEqual(tusDelegate.finishedUploads.map(\.0), [metaData.id])
     }
 
+    func testCancellingAReattachedUploadStopsIt() throws {
+        let metaData = try storeUpload(uploadedBytes: 0)
+        let task = try makeInFlightPatch(for: metaData, range: 0..<100)
+        task.resume()
+        try startClient(chunkSize: 0)
+
+        try client.cancel(id: metaData.id)
+        waitForCancelledRequest(task)
+
+        XCTAssertTrue(tusDelegate.finishedUploads.isEmpty)
+        XCTAssertEqual(patchOffsets(), ["0"])
+        XCTAssertEqual(try files.loadAllMetadata().map(\.id), [metaData.id], "Cancelling keeps the upload for a later start()")
+    }
+
+    func testStoppingTheClientStopsAReattachedUpload() throws {
+        let metaData = try storeUpload(uploadedBytes: 0)
+        let task = try makeInFlightPatch(for: metaData, range: 0..<100)
+        task.resume()
+        try startClient(chunkSize: 0)
+
+        client.stopAndCancelAll()
+        waitForCancelledRequest(task)
+
+        XCTAssertTrue(tusDelegate.finishedUploads.isEmpty)
+        XCTAssertEqual(patchOffsets(), ["0"])
+        XCTAssertEqual(try files.loadAllMetadata().map(\.id), [metaData.id])
+    }
+
+    func testCancellingAReattachedChunkDoesNotScheduleTheNextOne() throws {
+        let metaData = try storeUpload(uploadedBytes: 25)
+        let task = try makeInFlightPatch(for: metaData, range: 25..<50)
+        task.resume()
+        try startClient(chunkSize: 25)
+
+        try client.cancel(id: metaData.id)
+        waitForCancelledRequest(task)
+
+        XCTAssertTrue(tusDelegate.finishedUploads.isEmpty)
+        XCTAssertEqual(patchOffsets(), ["25"])
+    }
+
     // MARK: - Helpers
+
+    /// Waits until `task` was cancelled, then for long enough that its response, a next chunk or a finished upload
+    /// would have shown up if cancelling hadn't reached it.
+    private func waitForCancelledRequest(_ task: URLSessionTask) {
+        let settled = expectation(description: "settled")
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2) { settled.fulfill() }
+        wait(for: [settled], timeout: 4)
+        XCTAssertEqual((task.error as? URLError)?.code, .cancelled, "The re-attached request should be cancelled")
+    }
+
+    private func patchOffsets() -> [String] {
+        MockURLProtocol.receivedRequests(testID: mockTestID)
+            .filter { $0.httpMethod == "PATCH" }
+            .compactMap { $0.value(forHTTPHeaderField: "Upload-Offset") }
+    }
 
     /// Stores the file and metadata of an upload the server has already received `uploadedBytes` of.
     private func storeUpload(uploadedBytes: Int) throws -> UploadMetadata {

@@ -557,20 +557,25 @@ public final class TUSClient {
         }
 
         for metadata in allMetadata {
-            api.checkTaskExists(for: metadata) { [weak self] taskExists in
+            api.runningUploadTask(for: metadata) { [weak self] sessionTask in
                 guard let self else {
                     return
                 }
-                guard taskExists,
+                guard let sessionTask,
                       let task = try? UploadDataTask(api: self.api, metaData: metadata, files: self.files, range: self.inFlightRange(for: metadata), headerGenerator: self.headerGenerator) else {
                     return
                 }
 
                 self.queue.sync { self.uploads[metadata.id] = metadata }
+                task.adopt(sessionTask)
+                self.scheduler.adoptRunningTask(task)
 
                 self.api.registerCallback({ result in
                     task.taskCompleted(result: result, completed: { [weak self] result in
                         guard let self else { return }
+                        // A request can still complete after it was cancelled, or after the client was stopped.
+                        let isStopped = self.queue.sync { self.didStopAndCancel }
+                        guard self.scheduler.finishAdoptedTask(task), !isStopped else { return }
                         switch result {
                         case let .success(newTasks):
                             // Handled like an upload the scheduler ran: report a finished upload, continue a chunked one.
