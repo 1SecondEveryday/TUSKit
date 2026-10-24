@@ -11,6 +11,7 @@
 - Uploads that a background `URLSession` finished or continued while the app wasn't running are handled when the client re-attaches to them on launch. Before, a finished upload was removed on the next launch without calling `didFinishUpload`, and a chunked upload stopped until the next `start()`. `cancel(id:)` and `stopAndCancelAll()` now reach these uploads too.
 
 ## Feature
+- `TUSClientDelegate` gains optional `willRetryUpload` and `didResumeUpload`, so apps can see when a failed request is retried and when an upload continues after an interruption, and from which offset.
 - `TUSRetryPolicy` sets how many times, and how long apart, failed requests are retried: the first retry is immediate and later ones back off exponentially up to a maximum. A status check answering 404 or 410 fails the upload without retrying, and servers that use other statuses for expired uploads can add them to `permanentStatusCodes`. Pass a policy to `TUSClient` with the new `retryPolicy` parameter.
 
 # 3.7.0
