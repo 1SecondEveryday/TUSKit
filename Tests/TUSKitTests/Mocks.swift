@@ -70,6 +70,17 @@ final class TUSMockDelegate: TUSClientDelegate {
     func progressFor(id: UUID, context: [String : String]?, bytesUploaded: Int, totalBytes: Int, client: TUSClient) {
         progressPerId[id] = bytesUploaded
     }
+
+    var retries = [(id: UUID, attempt: Int, delay: TimeInterval)]()
+    var resumes = [(id: UUID, offset: Int, reason: TUSUploadResumeReason)]()
+
+    func willRetryUpload(id: UUID, attempt: Int, delay: TimeInterval, error: Error, context: [String: String]?, client: TUSClient) {
+        retries.append((id, attempt, delay))
+    }
+
+    func didResumeUpload(id: UUID, offset: Int, reason: TUSUploadResumeReason, context: [String: String]?, client: TUSClient) {
+        resumes.append((id, offset, reason))
+    }
 }
 
 /// A minimal URLSessionTask stub with a fixed taskDescription, used to drive TUSAPI's
