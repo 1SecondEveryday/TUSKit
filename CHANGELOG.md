@@ -9,7 +9,7 @@
 - When a status check finds the server already has every byte, the upload is reported through `didFinishUpload` instead of being removed without telling the delegate.
 - Background `URLSession`s are no longer invalidated when a `TUSAPI` is deallocated, which broke other sessions using the same identifier ([#234](https://github.com/tus/TUSKit/pull/234) by [@samsonjs](https://github.com/samsonjs))
 - Uploads that a background `URLSession` finished or continued while the app wasn't running are handled when the client re-attaches to them on launch. Before, a finished upload was removed on the next launch without calling `didFinishUpload`, and a chunked upload stopped until the next `start()`. `cancel(id:)` and `stopAndCancelAll()` now reach these uploads too.
-- The handler passed to `registerBackgroundHandler(_:forSession:)` is now called once the next chunk's request has been made (or after a few seconds at most), so the system can't suspend the app before that request exists. The system still decides when a request made in the background runs.
+- The handler passed to `registerBackgroundHandler(_:forSession:)` is now called once the next chunk's request, or a failed request's retry, has been made (or after a few seconds at most), so the system can't suspend the app before that request exists. The system still decides when a request made in the background runs.
 - Status checks on a background `URLSession` now go over a regular session, so they run during a background launch. Before, a status check made during a background launch waited until the app was next opened.
 
 ## Feature

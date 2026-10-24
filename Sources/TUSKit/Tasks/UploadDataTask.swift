@@ -217,14 +217,14 @@ final class UploadDataTask: NSObject, IdentifiableTask {
         }
     }
 
-    /// Settles the API's follow-up for this upload when the task ends without a next task, whose request would.
+    /// Settles the API's follow-up for this upload when the task finished the upload. Otherwise the next request settles
+    /// it, whether a next chunk's or a failed task's retry's, and the background handler stays held until then or until
+    /// its timeout.
     private func settlingFollowUp(_ completed: @escaping TaskCompletion) -> TaskCompletion {
         return { [api, id] result in
-            if case let .success(nextTasks) = result, !nextTasks.isEmpty {
-                completed(result)
-                return
+            if case let .success(nextTasks) = result, nextTasks.isEmpty {
+                api.settleFollowUp(for: id)
             }
-            api.settleFollowUp(for: id)
             completed(result)
         }
     }
