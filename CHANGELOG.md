@@ -5,7 +5,7 @@
 
 ## Bugfix
 - Uploads that a background `URLSession` finished or continued while the app wasn't running are handled when the client re-attaches to them on launch. Before, a finished upload was removed on the next launch without calling `didFinishUpload`, and a chunked upload stopped until the next `start()`. `cancel(id:)` and `stopAndCancelAll()` now reach these uploads too.
-- The handler passed to `registerBackgroundHandler(_:forSession:)` is now called once the next chunk's request is under way (or after a few seconds at most), so a chunked upload keeps going while the app runs in the background instead of being suspended before that request is made.
+- The handler passed to `registerBackgroundHandler(_:forSession:)` is now called once the next chunk's request has been made (or after a few seconds at most), so the system can't suspend the app before that request exists. The system still decides when a request made in the background runs.
 
 # 3.7.0
 
