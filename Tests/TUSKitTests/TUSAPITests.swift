@@ -65,6 +65,70 @@ final class TUSAPITests: XCTestCase {
         waitForExpectations(timeout: 3, handler: nil)
     }
     
+    // MARK: - Status checks for a background session
+
+    func testStatusOfABackgroundSessionGoesOverARegularSession() throws {
+        MockURLProtocol.prepareResponse(for: "HEAD", testID: mockTestID) { _ in
+            MockURLProtocol.Response(status: 200, headers: ["Upload-Length": "3000", "Upload-Offset": "20"], data: nil)
+        }
+
+        let result = try fetchStatus(with: makeBackgroundAPI())
+
+        let status = try result.get()
+        XCTAssertEqual(status.length, 3000)
+        XCTAssertEqual(status.offset, 20)
+        let request = try XCTUnwrap(MockURLProtocol.receivedRequests(testID: mockTestID).first)
+        XCTAssertEqual(request.httpMethod, "HEAD")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "TUS-Resumable"), "1.0.0")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer tusk")
+    }
+
+    func testStatusOfABackgroundSessionReportsAFailedRequest() throws {
+        MockURLProtocol.prepareResponse(for: "HEAD", testID: mockTestID) { _ in
+            MockURLProtocol.Response(status: 423, headers: [:], data: Data("Locked".utf8))
+        }
+
+        let result = try fetchStatus(with: makeBackgroundAPI())
+
+        guard case let .failure(.failedRequest(response, data)) = result else {
+            return XCTFail("Expected a failed request, got \(result)")
+        }
+        XCTAssertEqual(response.statusCode, 423)
+        XCTAssertEqual(data, Data("Locked".utf8))
+    }
+
+    func testStatusOfABackgroundSessionWithoutAnOffsetCouldNotFetchStatus() throws {
+        MockURLProtocol.prepareResponse(for: "HEAD", testID: mockTestID) { _ in
+            MockURLProtocol.Response(status: 200, headers: ["Upload-Length": "3000"], data: nil)
+        }
+
+        let result = try fetchStatus(with: makeBackgroundAPI())
+
+        guard case .failure(.couldNotFetchStatus) = result else {
+            return XCTFail("Expected couldNotFetchStatus, got \(result)")
+        }
+    }
+
+    /// An API on a background session, whose status checks only reach the mock server over the regular session.
+    private func makeBackgroundAPI() -> TUSAPI {
+        let configuration = URLSessionConfiguration.background(withIdentifier: "TUSAPITests.\(UUID().uuidString)")
+        configuration.httpAdditionalHeaders = [MockURLProtocol.testIDHeader: mockTestID!, "Authorization": "Bearer tusk"]
+        let statusConfiguration = URLSessionConfiguration.ephemeral
+        statusConfiguration.protocolClasses = [MockURLProtocol.self]
+        return TUSAPI(sessionConfiguration: configuration, statusSessionConfiguration: statusConfiguration)
+    }
+
+    private func fetchStatus(with api: TUSAPI) throws -> Result<Status, TUSAPIError> {
+        let fetched = expectation(description: "Call api.status()")
+        var result: Result<Status, TUSAPIError>?
+        api.status(remoteDestination: URL(string: "https://tus.example.net/files/powder")!, headers: [:]) {
+            result = $0
+            fetched.fulfill()
+        }
+        wait(for: [fetched], timeout: 3)
+        return try XCTUnwrap(result)
+    }
+
     func testCreationWithAbsolutePath() throws {
         let remoteFileURL = URL(string: "https://tus.io/myfile")!
         MockURLProtocol.prepareResponse(for: "POST", testID: mockTestID) { _ in
