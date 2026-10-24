@@ -70,11 +70,20 @@ final class TUSAPI {
     private let statusSession: URLSession
     private let sessionDelegate = SessionDataDelegate()
     private let queue = DispatchQueue(label: "com.tus.TUSAPI")
-    private var backgroundHandler: (() -> Void)? = nil
     private var callbacks: [String: (Result<(Data?, HTTPURLResponse), Error>) -> Void] = [:]
     private var taskData: [String: Data] = [:]
     private var progressObservations: [String: NSKeyValueObservation] = [:]
     weak var progressDelegate: ProgressDelegate?
+
+    // Background events. Separate from `queue` because completions run on `queue` and settle follow-ups.
+    private let backgroundQueue = DispatchQueue(label: "com.tus.TUSAPI.background")
+    private var backgroundHandler: (() -> Void)? = nil
+    /// Uploads whose request completed and whose next request, if there is one, hasn't been made yet.
+    private var pendingFollowUps = Set<String>()
+    /// Set while the session has delivered all its background events and the handler waits for `pendingFollowUps`.
+    private var heldBackgroundEvents: UUID?
+    /// How long the background handler waits for follow-up requests before it's called anyway.
+    var backgroundEventsTimeout: TimeInterval = 5
 
     deinit {
         progressObservations.values.forEach { $0.invalidate() }
@@ -330,6 +339,7 @@ final class TUSAPI {
         }
         
         task.resume()
+        settleFollowUp(for: metaData.id)
         
         return task
     }
@@ -377,6 +387,7 @@ final class TUSAPI {
             }
         }
         task.resume()
+        settleFollowUp(for: metaData.id)
         return task
     }
 
@@ -414,7 +425,20 @@ final class TUSAPI {
     }
     
     func registerBackgroundHandler(_ handler: @escaping () -> Void) {
-        backgroundHandler = handler
+        backgroundQueue.sync {
+            backgroundHandler = handler
+        }
+    }
+
+    /// Marks the follow-up to an upload's completed request as settled: its next request was made, or there won't be
+    /// one. Once nothing is pending, a background handler that was held for follow-ups is called.
+    func settleFollowUp(for id: UUID) {
+        backgroundQueue.sync {
+            pendingFollowUps.remove(id.uuidString)
+            if pendingFollowUps.isEmpty && heldBackgroundEvents != nil {
+                callBackgroundHandler()
+            }
+        }
     }
     
     func checkTaskExists(for metadata: UploadMetadata, completion: @escaping (Bool) -> Void) {
@@ -536,6 +560,14 @@ extension TUSAPI {
                 return
             }
 
+            // The next chunk's request is made asynchronously, after the session may already have finished
+            // delivering its background events. Hold the background handler for it until the upload settles it.
+            if task is URLSessionUploadTask {
+                backgroundQueue.sync {
+                    _ = pendingFollowUps.insert(identifier)
+                }
+            }
+
             if let error = error {
                 completion(.failure(TUSAPIError.underlyingError(error)))
                 return
@@ -552,12 +584,31 @@ extension TUSAPI {
         }
     }
 
+    /// Calling the background handler lets the system suspend the app, so it waits until every upload whose request
+    /// completed during these events has made its next request or has none to make, or until the timeout.
     func handleFinishOfBackgroundURLSessionEvents() {
-        if let backgroundHandler {
-            DispatchQueue.main.async {
-                backgroundHandler()
-                self.backgroundHandler = nil
+        backgroundQueue.sync {
+            guard backgroundHandler != nil else { return }
+            guard !pendingFollowUps.isEmpty else {
+                callBackgroundHandler()
+                return
+            }
+
+            let hold = UUID()
+            heldBackgroundEvents = hold
+            backgroundQueue.asyncAfter(deadline: .now() + backgroundEventsTimeout) {
+                guard self.heldBackgroundEvents == hold else { return }
+                self.callBackgroundHandler()
             }
         }
+    }
+
+    /// Must be called on `backgroundQueue`.
+    private func callBackgroundHandler() {
+        heldBackgroundEvents = nil
+        pendingFollowUps.removeAll()
+        guard let backgroundHandler else { return }
+        self.backgroundHandler = nil
+        DispatchQueue.main.async(execute: backgroundHandler)
     }
 }

@@ -62,6 +62,7 @@ final class UploadDataTask: NSObject, IdentifiableTask {
     }
     
     func run(completed: @escaping TaskCompletion) {
+        let completed = settlingFollowUp(completed)
         queue.async {
             // This check is right before the task is created. In case another thread calls cancel during this loop. Optimization: Add synchronization point (e.g. serial queue or actor).
             guard !self.isCanceled else {
@@ -115,6 +116,7 @@ final class UploadDataTask: NSObject, IdentifiableTask {
     }
     
     func taskCompleted(result: UploadTaskResult, completed: @escaping TaskCompletion) {
+        let completed = settlingFollowUp(completed)
         do {
             let (receivedOffset, responseHeaders) = try result.get()
             metaData.responseHeaders = responseHeaders
@@ -211,6 +213,19 @@ final class UploadDataTask: NSObject, IdentifiableTask {
         queue.async {
             self.isCanceled = true
             self.sessionTask?.cancel()
+            self.api.settleFollowUp(for: self.id)
+        }
+    }
+
+    /// Settles the API's follow-up for this upload when the task finished the upload. Otherwise the next request settles
+    /// it, whether a next chunk's or a failed task's retry's, and the background handler stays held until then or until
+    /// its timeout.
+    private func settlingFollowUp(_ completed: @escaping TaskCompletion) -> TaskCompletion {
+        return { [api, id] result in
+            if case let .success(nextTasks) = result, nextTasks.isEmpty {
+                api.settleFollowUp(for: id)
+            }
+            completed(result)
         }
     }
 }
