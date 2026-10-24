@@ -64,6 +64,10 @@ final class TUSAPI {
     
     let sessionIdentifier: String?
     private let session: URLSession
+    /// A background session runs data tasks only while the app is in the foreground, so a status check made during a
+    /// background launch would wait until the app is opened. When `session` is a background session, status checks go
+    /// over this regular session instead.
+    private let statusSession: URLSession?
     private let sessionDelegate = SessionDataDelegate()
     private let queue = DispatchQueue(label: "com.tus.TUSAPI")
     private var callbacks: [String: (Result<(Data?, HTTPURLResponse), Error>) -> Void] = [:]
@@ -89,18 +93,29 @@ final class TUSAPI {
         if session.delegate is SessionDataDelegate, session.configuration.identifier == nil {
             session.finishTasksAndInvalidate()
         }
+        statusSession?.finishTasksAndInvalidate()
     }
     
-    init(session: URLSession) {
+    init(session: URLSession, statusSessionConfiguration: URLSessionConfiguration = .default) {
         self.session = session
         self.sessionIdentifier = session.configuration.identifier
+        self.statusSession = Self.makeStatusSession(for: session.configuration, from: statusSessionConfiguration)
         self.sessionDelegate.api = self
     }
     
-    init(sessionConfiguration: URLSessionConfiguration) {
+    init(sessionConfiguration: URLSessionConfiguration, statusSessionConfiguration: URLSessionConfiguration = .default) {
         self.session = URLSession(configuration: sessionConfiguration, delegate: sessionDelegate, delegateQueue: nil)
         self.sessionIdentifier = sessionConfiguration.identifier
+        self.statusSession = Self.makeStatusSession(for: sessionConfiguration, from: statusSessionConfiguration)
         self.sessionDelegate.api = self
+    }
+
+    private static func makeStatusSession(for sessionConfiguration: URLSessionConfiguration, from statusSessionConfiguration: URLSessionConfiguration) -> URLSession? {
+        guard sessionConfiguration.identifier != nil else { return nil }
+        let configuration = statusSessionConfiguration.copy() as! URLSessionConfiguration
+        configuration.httpAdditionalHeaders = sessionConfiguration.httpAdditionalHeaders
+        configuration.timeoutIntervalForRequest = 30
+        return URLSession(configuration: configuration)
     }
     
     @discardableResult
@@ -152,6 +167,22 @@ final class TUSAPI {
     @discardableResult
     func status(remoteDestination: URL, headers: [String: String]?, completion: @escaping (Result<Status, TUSAPIError>) -> Void) -> URLSessionDataTask {
         let request = makeRequest(url: remoteDestination, method: .head, headers: headers ?? [:])
+        if let statusSession {
+            let task = statusSession.dataTask(with: request) { data, response, error in
+                processResult(completion: completion) {
+                    if let error {
+                        throw error
+                    }
+                    guard let response = response as? HTTPURLResponse else {
+                        throw NetworkError.noHTTPURLResponse
+                    }
+                    return try Self.status(from: response, data: data)
+                }
+            }
+            task.resume()
+            return task
+        }
+
         let identifier = UUID().uuidString
         
         let task = session.dataTask(with: request)
@@ -164,23 +195,26 @@ final class TUSAPI {
             callbacks[identifier] = { result in
                 processResult(completion: completion) {
                     let (data, response) =  try result.get()
-
-                    guard (200...299).contains(response.statusCode) else {
-                        throw TUSAPIError.failedRequest(response, data)
-                    }
-                    
-                    guard let lengthStr = response.allHeaderFields[caseInsensitive: "upload-Length"] as? String,
-                          let length = Int(lengthStr),
-                          let offsetStr = response.allHeaderFields[caseInsensitive: "upload-Offset"] as? String,
-                          let offset = Int(offsetStr) else {
-                        throw TUSAPIError.couldNotFetchStatus
-                    }
-                    return Status(length: length, offset: offset)
+                    return try Self.status(from: response, data: data)
                 }
             }
         }
         task.resume()
         return task
+    }
+
+    private static func status(from response: HTTPURLResponse, data: Data?) throws -> Status {
+        guard (200...299).contains(response.statusCode) else {
+            throw TUSAPIError.failedRequest(response, data)
+        }
+
+        guard let lengthStr = response.allHeaderFields[caseInsensitive: "upload-Length"] as? String,
+              let length = Int(lengthStr),
+              let offsetStr = response.allHeaderFields[caseInsensitive: "upload-Offset"] as? String,
+              let offset = Int(offsetStr) else {
+            throw TUSAPIError.couldNotFetchStatus
+        }
+        return Status(length: length, offset: offset)
     }
     
     /// The create step of an upload. In this step, we tell the server we are about to upload data.
