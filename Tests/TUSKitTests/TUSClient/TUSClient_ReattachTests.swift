@@ -67,6 +67,8 @@ final class TUSClient_ReattachTests: XCTestCase {
 
         XCTAssertEqual(tusDelegate.finishedUploads.map(\.0), [metaData.id])
         XCTAssertEqual(tusDelegate.finishedUploads.first?.1, remoteDestination)
+        XCTAssertEqual(tusDelegate.resumes.map(\.reason), [.reattached])
+        XCTAssertEqual(tusDelegate.resumes.map(\.offset), [0])
         XCTAssertEqual(try files.loadAllMetadata().count, 0)
         XCTAssertFalse(FileManager.default.fileExists(atPath: metaData.filePath.path))
     }
@@ -83,6 +85,8 @@ final class TUSClient_ReattachTests: XCTestCase {
 
         XCTAssertEqual(patchOffsets(), ["25", "50", "75"])
         XCTAssertEqual(tusDelegate.finishedUploads.map(\.0), [metaData.id])
+        XCTAssertEqual(tusDelegate.resumes.map(\.reason), [.reattached])
+        XCTAssertEqual(tusDelegate.resumes.map(\.offset), [25])
     }
 
     func testCancellingAReattachedUploadStopsIt() throws {
