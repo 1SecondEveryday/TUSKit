@@ -9,6 +9,7 @@
 - When a status check finds the server already has every byte, the upload is reported through `didFinishUpload` instead of being removed without telling the delegate.
 - Background `URLSession`s are no longer invalidated when a `TUSAPI` is deallocated, which broke other sessions using the same identifier ([#234](https://github.com/tus/TUSKit/pull/234) by [@samsonjs](https://github.com/samsonjs))
 - Uploads that a background `URLSession` finished or continued while the app wasn't running are handled when the client re-attaches to them on launch. Before, a finished upload was removed on the next launch without calling `didFinishUpload`, and a chunked upload stopped until the next `start()`. `cancel(id:)` and `stopAndCancelAll()` now reach these uploads too, and a re-attached request that fails is retried like any other failed request.
+- The handler passed to `registerBackgroundHandler(_:forSession:)` is now called once the next chunk's request has been made (or after a few seconds at most), so the system can't suspend the app before that request exists. The system still decides when a request made in the background runs.
 
 ## Feature
 - `TUSClientDelegate` gains optional `willRetryUpload` and `didResumeUpload`, so apps can see when a failed request is retried and when an upload continues after an interruption, and from which offset.
