@@ -9,6 +9,7 @@
 - When a status check finds the server already has every byte, the upload is reported through `didFinishUpload` instead of being removed without telling the delegate.
 - Background `URLSession`s are no longer invalidated when a `TUSAPI` is deallocated, which broke other sessions using the same identifier ([#234](https://github.com/tus/TUSKit/pull/234) by [@samsonjs](https://github.com/samsonjs))
 - Uploads that a background `URLSession` finished or continued while the app wasn't running are handled when the client re-attaches to them on launch. Before, a finished upload was removed on the next launch without calling `didFinishUpload`, and a chunked upload stopped until the next `start()`. `cancel(id:)` and `stopAndCancelAll()` now reach these uploads too.
+- When a re-attached request fails, the upload continues from the server's offset like any other failed request. Before, it stopped until the next `start()`, e.g. after a reboot, when the system sends the request again from its original offset and the server rejects it with 409.
 
 ## Feature
 - `TUSRetryPolicy` sets how many times, and how long apart, failed requests are retried: the first retry is immediate and later ones back off exponentially up to a maximum. A status check answering 404 or 410 fails the upload without retrying, and servers that use other statuses for expired uploads can add them to `permanentStatusCodes`. Pass a policy to `TUSClient` with the new `retryPolicy` parameter.
