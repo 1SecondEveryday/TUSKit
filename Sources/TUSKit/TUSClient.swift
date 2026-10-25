@@ -574,8 +574,7 @@ public final class TUSClient {
                     task.taskCompleted(result: result, completed: { [weak self] result in
                         guard let self else { return }
                         // A request can still complete after it was cancelled, or after the client was stopped.
-                        let isStopped = self.queue.sync { self.didStopAndCancel }
-                        guard self.scheduler.finishAdoptedTask(task), !isStopped else { return }
+                        guard self.scheduler.finishAdoptedTask(task) else { return }
                         switch result {
                         case let .success(newTasks):
                             // Handled like an upload the scheduler ran: report a finished upload, continue a chunked one.
