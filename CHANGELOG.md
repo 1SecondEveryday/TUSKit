@@ -11,6 +11,7 @@
 - Uploads that a background `URLSession` finished or continued while the app wasn't running are handled when the client re-attaches to them on launch. Before, a finished upload was removed on the next launch without calling `didFinishUpload`, and a chunked upload stopped until the next `start()`. `cancel(id:)` and `stopAndCancelAll()` now reach these uploads too.
 - The handler passed to `registerBackgroundHandler(_:forSession:)` is now called once the next chunk's request, or a failed request's retry, has been made (or after a few seconds at most), so the system can't suspend the app before that request exists. The system still decides when a request made in the background runs.
 - Status checks on a background `URLSession` now go over a regular session, so they run during a background launch. Before, a status check made during a background launch waited until the app was next opened.
+- When a re-attached request fails, the upload continues from the server's offset like any other failed request. Before, it stopped until the next `start()`, e.g. after a reboot, when the system sends the request again from its original offset and the server rejects it with 409.
 
 ## Feature
 - `TUSClientDelegate` gains optional `willRetryUpload` and `didResumeUpload`, so apps can see when a failed request is retried and when an upload continues after an interruption, and from which offset.

@@ -612,8 +612,10 @@ public final class TUSClient {
                             // Handled like an upload the scheduler ran: report a finished upload, continue a chunked one.
                             self.handleFinishedUploadTask(task)
                             self.scheduler.addTasks(tasks: newTasks)
-                        case .failure:
-                            _ = try? self.retry(id: metadata.id)
+                        case let .failure(error):
+                            // Also handled like a failed task the scheduler ran, which checks the server's offset and
+                            // continues from there. retry(id:) would do nothing, since the upload is already in `uploads`.
+                            self.onError(error: error, task: task, scheduler: self.scheduler)
                         }
                     })
                 }, forMetadata: metadata)
