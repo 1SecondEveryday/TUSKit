@@ -130,6 +130,36 @@ final class TUSClient_ReattachTests: XCTestCase {
         XCTAssertEqual(patchOffsets(), ["25"])
     }
 
+    func testReattachedRequestTheServerRejectsContinuesFromTheServerOffset() throws {
+        // After a reboot the system sends the request again from the offset it started at, but the server already
+        // has more than that.
+        var isFirstPatch = true
+        MockURLProtocol.prepareResponse(for: "PATCH", testID: mockTestID) { headers in
+            defer { isFirstPatch = false }
+            if isFirstPatch {
+                return MockURLProtocol.Response(status: 409, headers: [:], data: nil, delay: 1)
+            }
+            let offset = Int(headers?["Upload-Offset"] ?? "") ?? 0
+            let length = Int(headers?["Content-Length"] ?? "") ?? 0
+            return MockURLProtocol.Response(status: 204, headers: ["Upload-Offset": String(offset + length)], data: nil)
+        }
+        MockURLProtocol.prepareResponse(for: "HEAD", testID: mockTestID) { _ in
+            MockURLProtocol.Response(status: 200, headers: ["Upload-Length": "100", "Upload-Offset": "60"], data: nil)
+        }
+
+        let metaData = try storeUpload(uploadedBytes: 0)
+        let task = try makeInFlightPatch(for: metaData, range: 0..<100)
+        task.resume()
+        try startClient(chunkSize: 0)
+
+        let finished = expectation(description: "didFinishUpload")
+        tusDelegate.finishUploadExpectation = finished
+        wait(for: [finished], timeout: 5)
+
+        XCTAssertEqual(patchOffsets(), ["0", "60"])
+        XCTAssertEqual(tusDelegate.finishedUploads.map(\.0), [metaData.id])
+    }
+
     // MARK: - Background events
 
     func testBackgroundHandlerWaitsForTheNextChunksRequest() throws {
