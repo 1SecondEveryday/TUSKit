@@ -64,10 +64,10 @@ final class TUSAPI {
     
     let sessionIdentifier: String?
     private let session: URLSession
-    /// A background session runs data tasks only while the app is in the foreground, so a status check made during a
-    /// background launch would wait until the app is opened. When `session` is a background session, status checks go
-    /// over this regular session instead.
-    private let statusSession: URLSession?
+    /// The session status checks go over: `session` itself, or a regular session when `session` is a background
+    /// session. A background session runs data tasks only while the app is in the foreground, so a status check made
+    /// during a background launch would wait until the app is opened.
+    private let statusSession: URLSession
     private let sessionDelegate = SessionDataDelegate()
     private let queue = DispatchQueue(label: "com.tus.TUSAPI")
     private var callbacks: [String: (Result<(Data?, HTTPURLResponse), Error>) -> Void] = [:]
@@ -93,27 +93,31 @@ final class TUSAPI {
         if session.delegate is SessionDataDelegate, session.configuration.identifier == nil {
             session.finishTasksAndInvalidate()
         }
-        statusSession?.finishTasksAndInvalidate()
+        if statusSession !== session {
+            statusSession.finishTasksAndInvalidate()
+        }
     }
     
     init(session: URLSession, statusSessionConfiguration: URLSessionConfiguration = .default) {
         self.session = session
         self.sessionIdentifier = session.configuration.identifier
-        self.statusSession = Self.makeStatusSession(for: session.configuration, from: statusSessionConfiguration)
+        self.statusSession = Self.makeStatusSession(for: session, from: statusSessionConfiguration)
         self.sessionDelegate.api = self
     }
     
     init(sessionConfiguration: URLSessionConfiguration, statusSessionConfiguration: URLSessionConfiguration = .default) {
-        self.session = URLSession(configuration: sessionConfiguration, delegate: sessionDelegate, delegateQueue: nil)
+        let session = URLSession(configuration: sessionConfiguration, delegate: sessionDelegate, delegateQueue: nil)
+        self.session = session
         self.sessionIdentifier = sessionConfiguration.identifier
-        self.statusSession = Self.makeStatusSession(for: sessionConfiguration, from: statusSessionConfiguration)
+        self.statusSession = Self.makeStatusSession(for: session, from: statusSessionConfiguration)
         self.sessionDelegate.api = self
     }
 
-    private static func makeStatusSession(for sessionConfiguration: URLSessionConfiguration, from statusSessionConfiguration: URLSessionConfiguration) -> URLSession? {
-        guard sessionConfiguration.identifier != nil else { return nil }
+    private static func makeStatusSession(for session: URLSession, from statusSessionConfiguration: URLSessionConfiguration) -> URLSession {
+        precondition(statusSessionConfiguration.identifier == nil, "Status checks need a regular session configuration, not a background one")
+        guard session.configuration.identifier != nil else { return session }
         let configuration = statusSessionConfiguration.copy() as! URLSessionConfiguration
-        configuration.httpAdditionalHeaders = sessionConfiguration.httpAdditionalHeaders
+        configuration.httpAdditionalHeaders = session.configuration.httpAdditionalHeaders
         configuration.timeoutIntervalForRequest = 30
         return URLSession(configuration: configuration)
     }
@@ -167,36 +171,15 @@ final class TUSAPI {
     @discardableResult
     func status(remoteDestination: URL, headers: [String: String]?, completion: @escaping (Result<Status, TUSAPIError>) -> Void) -> URLSessionDataTask {
         let request = makeRequest(url: remoteDestination, method: .head, headers: headers ?? [:])
-        if let statusSession {
-            let task = statusSession.dataTask(with: request) { data, response, error in
-                processResult(completion: completion) {
-                    if let error {
-                        throw error
-                    }
-                    guard let response = response as? HTTPURLResponse else {
-                        throw NetworkError.noHTTPURLResponse
-                    }
-                    return try Self.status(from: response, data: data)
+        let task = statusSession.dataTask(with: request) { data, response, error in
+            processResult(completion: completion) {
+                if let error {
+                    throw error
                 }
-            }
-            task.resume()
-            return task
-        }
-
-        let identifier = UUID().uuidString
-        
-        let task = session.dataTask(with: request)
-        task.taskDescription = identifier
-        if #available(iOS 15.0, macOS 12, *), !session.configuration.sessionSendsLaunchEvents {
-            task.delegate = sessionDelegate
-        }
-        
-        queue.sync {
-            callbacks[identifier] = { result in
-                processResult(completion: completion) {
-                    let (data, response) =  try result.get()
-                    return try Self.status(from: response, data: data)
+                guard let response = response as? HTTPURLResponse else {
+                    throw NetworkError.noHTTPURLResponse
                 }
+                return try Self.status(from: response, data: data)
             }
         }
         task.resume()
