@@ -4,7 +4,7 @@
 - `TUSClientError.couldNotGetFileStatus` now includes an `underlyingError` for better diagnostics.
 
 ## Bugfix
-- Uploads that a background `URLSession` finished or continued while the app wasn't running are handled when the client re-attaches to them on launch. Before, a finished upload was removed on the next launch without calling `didFinishUpload`, and a chunked upload stopped until the next `start()`. `cancel(id:)` and `stopAndCancelAll()` now reach these uploads too.
+- Uploads that a background `URLSession` finished or continued while the app wasn't running are handled when the client re-attaches to them on launch. Before, a finished upload was removed on the next launch without calling `didFinishUpload`, and a chunked upload stopped until the next `start()`. `cancel(id:)` and `stopAndCancelAll()` now reach these uploads too, and a re-attached request that fails is retried like any other failed request.
 
 # 3.7.0
 
