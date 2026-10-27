@@ -3,6 +3,10 @@
 ## Breaking changes
 - `TUSClientError.couldNotGetFileStatus` now includes an `underlyingError` for better diagnostics.
 
+## Bugfix
+- A failed upload is retried from the server's offset, fetched with a `HEAD` request, instead of resending the same range. Before, once the server had kept part of an interrupted upload, every retry was rejected with 409 until the upload failed; uploads with `chunkSize` 0 resent the whole file from offset 0. The retry count now only resets when the server's offset moves forward.
+- When a status check finds the server already has every byte, the upload is reported through `didFinishUpload` instead of being removed without telling the delegate.
+
 # 3.7.0
 
 - Removed cocoapods support
