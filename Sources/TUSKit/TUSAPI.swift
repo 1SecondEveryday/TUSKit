@@ -64,31 +64,59 @@ final class TUSAPI {
     
     let sessionIdentifier: String?
     private let session: URLSession
+    /// The session status checks go over: `session` itself, or a regular session when `session` is a background
+    /// session. A background session runs data tasks only while the app is in the foreground, so a status check made
+    /// during a background launch would wait until the app is opened.
+    private let statusSession: URLSession
     private let sessionDelegate = SessionDataDelegate()
     private let queue = DispatchQueue(label: "com.tus.TUSAPI")
-    private var backgroundHandler: (() -> Void)? = nil
     private var callbacks: [String: (Result<(Data?, HTTPURLResponse), Error>) -> Void] = [:]
     private var taskData: [String: Data] = [:]
     private var progressObservations: [String: NSKeyValueObservation] = [:]
     weak var progressDelegate: ProgressDelegate?
+
+    // Background events. Separate from `queue` because completions run on `queue` and settle follow-ups.
+    private let backgroundQueue = DispatchQueue(label: "com.tus.TUSAPI.background")
+    private var backgroundHandler: (() -> Void)? = nil
+    /// Uploads whose request completed and whose next request, if there is one, hasn't been made yet.
+    private var pendingFollowUps = Set<String>()
+    /// Set while the session has delivered all its background events and the handler waits for `pendingFollowUps`.
+    private var heldBackgroundEvents: UUID?
+    /// How long the background handler waits for follow-up requests before it's called anyway.
+    var backgroundEventsTimeout: TimeInterval = 5
 
     deinit {
         progressObservations.values.forEach { $0.invalidate() }
         if session.delegate is SessionDataDelegate {
             session.finishTasksAndInvalidate()
         }
+        if statusSession !== session {
+            statusSession.finishTasksAndInvalidate()
+        }
     }
     
-    init(session: URLSession) {
+    init(session: URLSession, statusSessionConfiguration: URLSessionConfiguration = .default) {
         self.session = session
         self.sessionIdentifier = session.configuration.identifier
+        self.statusSession = Self.makeStatusSession(for: session, from: statusSessionConfiguration)
         self.sessionDelegate.api = self
     }
     
-    init(sessionConfiguration: URLSessionConfiguration) {
-        self.session = URLSession(configuration: sessionConfiguration, delegate: sessionDelegate, delegateQueue: nil)
+    init(sessionConfiguration: URLSessionConfiguration, statusSessionConfiguration: URLSessionConfiguration = .default) {
+        let session = URLSession(configuration: sessionConfiguration, delegate: sessionDelegate, delegateQueue: nil)
+        self.session = session
         self.sessionIdentifier = sessionConfiguration.identifier
+        self.statusSession = Self.makeStatusSession(for: session, from: statusSessionConfiguration)
         self.sessionDelegate.api = self
+    }
+
+    private static func makeStatusSession(for session: URLSession, from statusSessionConfiguration: URLSessionConfiguration) -> URLSession {
+        precondition(statusSessionConfiguration.identifier == nil, "Status checks need a regular session configuration, not a background one")
+        guard session.configuration.identifier != nil else { return session }
+        let configuration = statusSessionConfiguration.copy() as! URLSessionConfiguration
+        configuration.httpAdditionalHeaders = session.configuration.httpAdditionalHeaders
+        configuration.timeoutIntervalForRequest = 30
+        return URLSession(configuration: configuration)
     }
     
     @discardableResult
@@ -140,35 +168,33 @@ final class TUSAPI {
     @discardableResult
     func status(remoteDestination: URL, headers: [String: String]?, completion: @escaping (Result<Status, TUSAPIError>) -> Void) -> URLSessionDataTask {
         let request = makeRequest(url: remoteDestination, method: .head, headers: headers ?? [:])
-        let identifier = UUID().uuidString
-        
-        let task = session.dataTask(with: request)
-        task.taskDescription = identifier
-        if #available(iOS 15.0, macOS 12, *), !session.configuration.sessionSendsLaunchEvents {
-            task.delegate = sessionDelegate
-        }
-        
-        queue.sync {
-            callbacks[identifier] = { result in
-                processResult(completion: completion) {
-                    let (data, response) =  try result.get()
-
-                    guard (200...299).contains(response.statusCode) else {
-                        throw TUSAPIError.failedRequest(response, data)
-                    }
-                    
-                    guard let lengthStr = response.allHeaderFields[caseInsensitive: "upload-Length"] as? String,
-                          let length = Int(lengthStr),
-                          let offsetStr = response.allHeaderFields[caseInsensitive: "upload-Offset"] as? String,
-                          let offset = Int(offsetStr) else {
-                        throw TUSAPIError.couldNotFetchStatus
-                    }
-                    return Status(length: length, offset: offset)
+        let task = statusSession.dataTask(with: request) { data, response, error in
+            processResult(completion: completion) {
+                if let error {
+                    throw error
                 }
+                guard let response = response as? HTTPURLResponse else {
+                    throw NetworkError.noHTTPURLResponse
+                }
+                return try Self.status(from: response, data: data)
             }
         }
         task.resume()
         return task
+    }
+
+    private static func status(from response: HTTPURLResponse, data: Data?) throws -> Status {
+        guard (200...299).contains(response.statusCode) else {
+            throw TUSAPIError.failedRequest(response, data)
+        }
+
+        guard let lengthStr = response.allHeaderFields[caseInsensitive: "upload-Length"] as? String,
+              let length = Int(lengthStr),
+              let offsetStr = response.allHeaderFields[caseInsensitive: "upload-Offset"] as? String,
+              let offset = Int(offsetStr) else {
+            throw TUSAPIError.couldNotFetchStatus
+        }
+        return Status(length: length, offset: offset)
     }
     
     /// The create step of an upload. In this step, we tell the server we are about to upload data.
@@ -313,6 +339,7 @@ final class TUSAPI {
         }
         
         task.resume()
+        settleFollowUp(for: metaData.id)
         
         return task
     }
@@ -360,6 +387,7 @@ final class TUSAPI {
             }
         }
         task.resume()
+        settleFollowUp(for: metaData.id)
         return task
     }
 
@@ -397,7 +425,20 @@ final class TUSAPI {
     }
     
     func registerBackgroundHandler(_ handler: @escaping () -> Void) {
-        backgroundHandler = handler
+        backgroundQueue.sync {
+            backgroundHandler = handler
+        }
+    }
+
+    /// Marks the follow-up to an upload's completed request as settled: its next request was made, or there won't be
+    /// one. Once nothing is pending, a background handler that was held for follow-ups is called.
+    func settleFollowUp(for id: UUID) {
+        backgroundQueue.sync {
+            pendingFollowUps.remove(id.uuidString)
+            if pendingFollowUps.isEmpty && heldBackgroundEvents != nil {
+                callBackgroundHandler()
+            }
+        }
     }
     
     func checkTaskExists(for metadata: UploadMetadata, completion: @escaping (Bool) -> Void) {
@@ -519,6 +560,14 @@ extension TUSAPI {
                 return
             }
 
+            // The next chunk's request is made asynchronously, after the session may already have finished
+            // delivering its background events. Hold the background handler for it until the upload settles it.
+            if task is URLSessionUploadTask {
+                backgroundQueue.sync {
+                    _ = pendingFollowUps.insert(identifier)
+                }
+            }
+
             if let error = error {
                 completion(.failure(TUSAPIError.underlyingError(error)))
                 return
@@ -535,12 +584,31 @@ extension TUSAPI {
         }
     }
 
+    /// Calling the background handler lets the system suspend the app, so it waits until every upload whose request
+    /// completed during these events has made its next request or has none to make, or until the timeout.
     func handleFinishOfBackgroundURLSessionEvents() {
-        if let backgroundHandler {
-            DispatchQueue.main.async {
-                backgroundHandler()
-                self.backgroundHandler = nil
+        backgroundQueue.sync {
+            guard backgroundHandler != nil else { return }
+            guard !pendingFollowUps.isEmpty else {
+                callBackgroundHandler()
+                return
+            }
+
+            let hold = UUID()
+            heldBackgroundEvents = hold
+            backgroundQueue.asyncAfter(deadline: .now() + backgroundEventsTimeout) {
+                guard self.heldBackgroundEvents == hold else { return }
+                self.callBackgroundHandler()
             }
         }
+    }
+
+    /// Must be called on `backgroundQueue`.
+    private func callBackgroundHandler() {
+        heldBackgroundEvents = nil
+        pendingFollowUps.removeAll()
+        guard let backgroundHandler else { return }
+        self.backgroundHandler = nil
+        DispatchQueue.main.async(execute: backgroundHandler)
     }
 }
