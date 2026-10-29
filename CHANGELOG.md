@@ -5,6 +5,15 @@
 
 ## Bugfix
 - Rejected `PATCH` responses are reported as `TUSAPIError.failedRequest` with their status code instead of `couldNotRetrieveOffset` ([#233](https://github.com/tus/TUSKit/pull/233) by [@samsonjs](https://github.com/samsonjs))
+- Background `URLSession`s are no longer invalidated when a `TUSAPI` is deallocated, which broke other sessions using the same identifier ([#234](https://github.com/tus/TUSKit/pull/234) by [@samsonjs](https://github.com/samsonjs))
+- A failed upload is retried from the server's offset, fetched with a `HEAD` request, instead of resending the same range. Before, once the server had kept part of an interrupted upload, every retry was rejected with 409 until the upload failed; uploads with `chunkSize` 0 resent the whole file from offset 0. The retry count now only resets when the server's offset moves forward.
+- When a status check finds the server already has every byte, the upload is reported through `didFinishUpload` instead of being removed without telling the delegate.
+- Uploads that a background `URLSession` finished or continued while the app wasn't running are handled when the client re-attaches to them on launch. Before, a finished upload was removed on the next launch without calling `didFinishUpload`, and a chunked upload stopped until the next `start()`. `cancel(id:)` and `stopAndCancelAll()` now reach these uploads too, and a re-attached request that fails continues from the offset the server has, rather than resending a range the server rejects.
+- Status checks on a background `URLSession` now go over a regular session, so they run during a background launch. Before, a status check made during a background launch, such as the one that resumes an upload after a failed request, waited until the app was next opened.
+- The handler passed to `registerBackgroundHandler(_:forSession:)` is now called once the next chunk's request, or a failed request's retry, has been made (or after a few seconds at most), so the system can't suspend the app before that request exists. The system still decides when a request made in the background runs.
+
+## Feature
+- `TUSRetryPolicy` sets how many times, and how long apart, failed requests are retried: the first retry is immediate and later ones back off exponentially up to a maximum. A status check answering 404 or 410 fails the upload without retrying, and servers that use other statuses for expired uploads can add them to `permanentStatusCodes`. Pass a policy to `TUSClient` with the new `retryPolicy` parameter.
 
 # 3.7.0
 

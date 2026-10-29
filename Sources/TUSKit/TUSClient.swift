@@ -85,8 +85,8 @@ public final class TUSClient {
     
     // MARK: - Private Properties
     
-    /// How often to try an upload if it fails. A retryCount of 2 means 3 total uploads max. (1 initial upload, and on repeated failure, 2 more retries.)
-    private let retryCount = 2
+    /// How failed requests are retried. See `TUSRetryPolicy`.
+    private let retryPolicy: TUSRetryPolicy
     
     private let files: Files
     private var didStopAndCancel = false
@@ -109,6 +109,7 @@ public final class TUSClient {
     ///   You can also pass an absolute path, e.g. "file://uploads/TUS"
     ///   - chunkSize: The amount of bytes the data to upload will be chunked by. Defaults to 512 kB.
     ///   - supportedExtensions: The TUS protocol extensions that the client should use. For now, the available supported extensions are `.creation`. Defaults to `[.creation]`.
+    ///   - retryPolicy: How failed requests are retried. Defaults to `TUSRetryPolicy.default`.
     ///
     /// - Important: The client assumes by default that your server implements the Creation TUS protocol extension. If your server does not support that,
     ///   make sure that you provide an empty array in the `supportExtensions` parameter.
@@ -116,7 +117,7 @@ public final class TUSClient {
     public init(server: URL, sessionIdentifier: String, sessionConfiguration: URLSessionConfiguration,
                 storageDirectory: URL? = nil, chunkSize: Int = 500 * 1024,
                 supportedExtensions: [TUSProtocolExtension] = [.creation], reportingQueue: DispatchQueue = DispatchQueue.main,
-                generateHeaders: HeaderGenerationHandler? = nil) throws {
+                generateHeaders: HeaderGenerationHandler? = nil, retryPolicy: TUSRetryPolicy = .default) throws {
 
         if #available(iOS 7.0, macOS 11.0, watchOS 6.0, *) {
           if sessionConfiguration.sessionSendsLaunchEvents == false {
@@ -138,6 +139,7 @@ public final class TUSClient {
             self.chunkSize = nil
         }
         self.supportedExtensions = supportedExtensions
+        self.retryPolicy = retryPolicy
         self.scheduler = scheduler
         self.reportingQueue = reportingQueue
         self.headerGenerator = HeaderGenerator(handler: generateHeaders)
@@ -155,6 +157,7 @@ public final class TUSClient {
     ///   - session: A URLSession you'd like to use. Will default to `URLSession.shared`.
     ///   - chunkSize: The amount of bytes the data to upload will be chunked by. Defaults to 512 kB.
     ///   - supportedExtensions: The TUS protocol extensions that the client should use. For now, the available supported extensions are `.creation`. Defaults to `[.creation]`.
+    ///   - retryPolicy: How failed requests are retried. Defaults to `TUSRetryPolicy.default`.
     ///
     /// - Important: The client assumes by default that your server implements the Creation TUS protocol extension. If your server does not support that,
     ///   make sure that you provide an empty array in the `supportExtensions` parameter.
@@ -163,7 +166,7 @@ public final class TUSClient {
     public init(server: URL, sessionIdentifier: String, storageDirectory: URL? = nil,
                 session: URLSession = URLSession.shared, chunkSize: Int = 500 * 1024,
                 supportedExtensions: [TUSProtocolExtension] = [.creation], reportingQueue: DispatchQueue = DispatchQueue.main,
-                generateHeaders: HeaderGenerationHandler? = nil) throws {
+                generateHeaders: HeaderGenerationHandler? = nil, retryPolicy: TUSRetryPolicy = .default) throws {
         self.sessionIdentifier = sessionIdentifier
         self.api = TUSAPI(session: session)
         self.files = try Files(storageDirectory: storageDirectory)
@@ -174,6 +177,7 @@ public final class TUSClient {
             self.chunkSize = nil
         }
         self.supportedExtensions = supportedExtensions
+        self.retryPolicy = retryPolicy
         self.scheduler = Scheduler()
         self.reportingQueue = reportingQueue
         self.headerGenerator = HeaderGenerator(handler: generateHeaders)
@@ -191,6 +195,7 @@ public final class TUSClient {
     ///   - session: A URLSession you'd like to use. Will default to `URLSession.shared`.
     ///   - chunkSize: The amount of bytes the data to upload will be chunked by. Defaults to 512 kB.
     ///   - supportedExtensions: The TUS protocol extensions that the client should use. For now, the available supported extensions are `.creation`. Defaults to `[.creation]`.
+    ///   - retryPolicy: How failed requests are retried. Defaults to `TUSRetryPolicy.default`.
     ///
     /// - Important: The client assumes by default that your server implements the Creation TUS protocol extension. If your server does not support that,
     ///   make sure that you provide an empty array in the `supportExtensions` parameter.
@@ -199,7 +204,7 @@ public final class TUSClient {
     public init(server: URL, storageDirectory: URL? = nil,
                 session: URLSession = URLSession.shared, chunkSize: Int = 500 * 1024,
                 supportedExtensions: [TUSProtocolExtension] = [.creation], reportingQueue: DispatchQueue = DispatchQueue.main,
-                generateHeaders: HeaderGenerationHandler? = nil) throws {
+                generateHeaders: HeaderGenerationHandler? = nil, retryPolicy: TUSRetryPolicy = .default) throws {
         guard session.configuration.sessionSendsLaunchEvents == false else {
             throw TUSClientError.customURLSessionWithBackgroundConfigurationNotSupported
         }
@@ -213,6 +218,7 @@ public final class TUSClient {
             self.chunkSize = nil
         }
         self.supportedExtensions = supportedExtensions
+        self.retryPolicy = retryPolicy
         self.scheduler = Scheduler()
         self.reportingQueue = reportingQueue
         self.headerGenerator = HeaderGenerator(handler: generateHeaders)
@@ -495,7 +501,7 @@ public final class TUSClient {
     /// - Returns: An id's array of erronous uploads.
     public func failedUploadIDs() throws -> [UUID] {
         try files.loadAllMetadata().compactMap { metaData in
-            if metaData.errorCount > retryCount {
+            if metaData.errorCount > retryPolicy.maximumRetries {
                 return metaData.id
             } else {
                 return nil
@@ -557,21 +563,38 @@ public final class TUSClient {
         }
 
         for metadata in allMetadata {
-            api.checkTaskExists(for: metadata) { [weak self] taskExists in
+            api.runningUploadTask(for: metadata) { [weak self] sessionTask in
                 guard let self else {
                     return
                 }
-                guard taskExists,
-                      let task = try? UploadDataTask(api: self.api, metaData: metadata, files: self.files, headerGenerator: self.headerGenerator) else {
+                guard let sessionTask,
+                      let task = try? UploadDataTask(api: self.api, metaData: metadata, files: self.files, range: self.inFlightRange(for: metadata), headerGenerator: self.headerGenerator) else {
                     return
                 }
 
                 self.queue.sync { self.uploads[metadata.id] = metadata }
+                task.adopt(sessionTask)
+                self.scheduler.adoptRunningTask(task)
 
                 self.api.registerCallback({ result in
                     task.taskCompleted(result: result, completed: { [weak self] result in
-                        if case .failure = result {
-                            _ = try? self?.retry(id: metadata.id)
+                        guard let self else { return }
+                        // A request can still complete after it was cancelled, or after the client was stopped.
+                        guard self.scheduler.finishAdoptedTask(task) else { return }
+                        switch result {
+                        case let .success(newTasks):
+                            // Handled like an upload the scheduler ran: report a finished upload, continue a chunked one.
+                            self.handleFinishedUploadTask(task)
+                            self.scheduler.addTasks(tasks: newTasks)
+                        case let .failure(error):
+                            // The system resends a re-attached request from the offset it started at, which the server
+                            // rejects once it has more than that. Ask the server where to continue instead. If that
+                            // fails too, the status check is retried like any other failed task.
+                            guard let remoteDestination = metadata.remoteDestination else {
+                                self.onError(error: error, task: task, scheduler: self.scheduler)
+                                return
+                            }
+                            self.scheduler.addTask(task: StatusTask(api: self.api, remoteDestination: remoteDestination, metaData: metadata, files: self.files, chunkSize: self.chunkSize, headerGenerator: self.headerGenerator))
                         }
                     })
                 }, forMetadata: metadata)
@@ -579,6 +602,14 @@ public final class TUSClient {
         }
     }
     
+    /// The chunk a background session was uploading for `metadata`, so the next chunk follows on from it.
+    /// Unchunked uploads have no range.
+    private func inFlightRange(for metadata: UploadMetadata) -> Range<Int>? {
+        let offset = metadata.uploadedRange?.upperBound ?? 0
+        guard let chunkSize, offset < metadata.size else { return nil }
+        return offset..<min(offset + chunkSize, metadata.size)
+    }
+
     /// Upload a file at the URL. Will not copy the path.
     /// - Parameter storedFilePath: The path where the file is stored for processing.
     private func scheduleTask(for storedFilePath: URL, id: UUID, uploadURL: URL?, customHeaders: [String: String], context: [String: String]?) throws {
@@ -644,7 +675,7 @@ public final class TUSClient {
         do {
             let metaDataItems = try files.loadAllMetadata().filter({ metaData in
                 // Only allow uploads where errors are below an amount
-                let acceptableErrorCount = metaData.errorCount <= retryCount
+                let acceptableErrorCount = metaData.errorCount <= retryPolicy.maximumRetries
                 let unFinished = !metaData.isFinished
                 
                 return acceptableErrorCount && unFinished
@@ -686,6 +717,46 @@ public final class TUSClient {
     
 }
 
+// MARK: - Retrying
+
+private extension TUSClient {
+    /// A failed PATCH may have stored some bytes or none, so retry by asking the server where to continue rather
+    /// than re-sending the same range: that would be rejected with 409 once the server has kept part of it.
+    func retryTask(after task: ScheduledTask, metaData: UploadMetadata) -> ScheduledTask {
+        guard task is UploadDataTask, let remoteDestination = metaData.remoteDestination else { return task }
+        return StatusTask(api: api, remoteDestination: remoteDestination, metaData: metaData, files: files, chunkSize: chunkSize, headerGenerator: headerGenerator)
+    }
+
+    /// A status check answering one of the policy's permanent statuses means the upload can never finish.
+    func isPermanentFailure(_ error: Error, of task: ScheduledTask) -> Bool {
+        guard task is StatusTask, let statusCode = httpStatusCode(of: error) else { return false }
+        return retryPolicy.permanentStatusCodes.contains(statusCode)
+    }
+
+    func httpStatusCode(of error: Error) -> Int? {
+        switch error {
+        case let apiError as TUSAPIError:
+            switch apiError {
+            case let .failedRequest(response, _):
+                return response.statusCode
+            case let .underlyingError(underlying):
+                return httpStatusCode(of: underlying)
+            default:
+                return nil
+            }
+        case let clientError as TUSClientError:
+            switch clientError {
+            case let .couldNotCreateFileOnServer(underlying), let .couldNotUploadFile(underlying), let .couldNotGetFileStatus(underlying):
+                return httpStatusCode(of: underlying)
+            default:
+                return nil
+            }
+        default:
+            return nil
+        }
+    }
+}
+
 extension TUSClient: SchedulerDelegate {
     func didFinishTask(task: ScheduledTask, scheduler: Scheduler) {
         switch task {
@@ -705,10 +776,17 @@ extension TUSClient: SchedulerDelegate {
     }
     
     func handleFinishedStatusTask(_ statusTask: StatusTask) {
-        statusTask.metaData.errorCount = 0 // We reset errorcounts after a succesful action.
-        if statusTask.metaData.isFinished {
-            _ = try? files.removeFileAndMetadata(statusTask.metaData) // If removing the file fails here, then it will be attempted again at next startup.
+        let metaData = statusTask.metaData
+        // A status check alone isn't progress: only reset when the server has more bytes than before, so a PATCH
+        // that keeps failing still runs out of retries, while a poor connection keeps going as long as it advances.
+        if statusTask.serverOffsetAdvanced {
+            metaData.errorCount = 0
         }
+        guard metaData.isFinished else { return }
+
+        _ = try? files.removeFileAndMetadata(metaData) // If removing the file fails here, then it will be attempted again at next startup.
+        // The server has every byte, e.g. the connection dropped before the final PATCH's response arrived.
+        didFinishUpload(id: metaData.id, url: statusTask.remoteDestination, context: metaData.context, client: self, responseHeaders: metaData.responseHeaders)
     }
     
     func handleFinishedUploadTask(_ uploadTask: UploadDataTask) {
@@ -801,7 +879,12 @@ extension TUSClient: SchedulerDelegate {
             return
         }
         
-        metaData.errorCount += 1
+        if isPermanentFailure(error, of: task) {
+            // Marked past the limit so the upload isn't loaded again on the next start either.
+            metaData.errorCount = retryPolicy.maximumRetries + 1
+        } else {
+            metaData.errorCount += 1
+        }
         do {
             try files.encodeAndStore(metaData: metaData)
         } catch let error {
@@ -811,9 +894,15 @@ extension TUSClient: SchedulerDelegate {
             }
         }
         
-        let canRetry = metaData.errorCount <= retryCount
+        let canRetry = metaData.errorCount <= retryPolicy.maximumRetries
         if canRetry {
-            scheduler.addTask(task: task)
+            let retryTask = self.retryTask(after: task, metaData: metaData)
+            let delay = retryPolicy.delay(beforeRetry: metaData.errorCount)
+            if delay > 0 {
+                scheduler.addTask(task: retryTask, after: delay)
+            } else {
+                scheduler.addTask(task: retryTask)
+            }
         } else { // Exhausted all retries, reporting back as failure.
             queue.sync {
                 self.uploads[metaData.id] = nil
