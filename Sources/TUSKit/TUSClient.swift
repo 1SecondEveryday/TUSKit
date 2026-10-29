@@ -45,6 +45,22 @@ public protocol TUSClientDelegate: AnyObject {
 
     /// Get the progress of a specific upload by id. The id is given when adding an upload and methods of this delegate.
     func progressFor(id: UUID, context: [String: String]?, bytesUploaded: Int, totalBytes: Int, client: TUSClient)
+
+    /// A request for an upload failed and will be retried after `delay` seconds. `attempt` counts retries from 1.
+    func willRetryUpload(id: UUID, attempt: Int, delay: TimeInterval, error: Error, context: [String: String]?, client: TUSClient)
+
+    /// An upload continues from `offset` bytes after an interruption.
+    func didResumeUpload(id: UUID, offset: Int, reason: TUSUploadResumeReason, context: [String: String]?, client: TUSClient)
+}
+
+/// Why an upload continues after an interruption.
+public enum TUSUploadResumeReason: Equatable {
+    /// A request the background session kept running across a relaunch was re-attached.
+    case reattached
+    /// A status check found how much the server has, and the upload continues from there.
+    case serverOffset
+    /// `start()` picked up an upload stored by an earlier run.
+    case storedUpload
 }
 
 public extension TUSClientDelegate {
@@ -60,6 +76,14 @@ public extension TUSClientDelegate {
 
     func fileError(id: UUID?, error: TUSClientError, client: TUSClient) {
         fileError(error: error, client: client)
+    }
+
+    func willRetryUpload(id: UUID, attempt: Int, delay: TimeInterval, error: Error, context: [String: String]?, client: TUSClient) {
+        // Optional
+    }
+
+    func didResumeUpload(id: UUID, offset: Int, reason: TUSUploadResumeReason, context: [String: String]?, client: TUSClient) {
+        // Optional
     }
 }
 
@@ -575,6 +599,7 @@ public final class TUSClient {
                 self.queue.sync { self.uploads[metadata.id] = metadata }
                 task.adopt(sessionTask)
                 self.scheduler.adoptRunningTask(task)
+                self.reportResume(of: metadata, reason: .reattached)
 
                 self.api.registerCallback({ result in
                     task.taskCompleted(result: result, completed: { [weak self] result in
@@ -686,6 +711,7 @@ public final class TUSClient {
                     if !taskExists {
                         do {
                             try self.scheduleTask(for: metaData)
+                            self.reportResume(of: metaData, reason: .storedUpload)
                         } catch {
                             //...
                         }
@@ -720,6 +746,13 @@ public final class TUSClient {
 // MARK: - Retrying
 
 private extension TUSClient {
+    func reportResume(of metaData: UploadMetadata, reason: TUSUploadResumeReason) {
+        let offset = metaData.uploadedRange?.upperBound ?? 0
+        reportingQueue.async {
+            self.delegate?.didResumeUpload(id: metaData.id, offset: offset, reason: reason, context: metaData.context, client: self)
+        }
+    }
+
     /// A failed PATCH may have stored some bytes or none, so retry by asking the server where to continue rather
     /// than re-sending the same range: that would be rejected with 409 once the server has kept part of it.
     func retryTask(after task: ScheduledTask, metaData: UploadMetadata) -> ScheduledTask {
@@ -782,7 +815,10 @@ extension TUSClient: SchedulerDelegate {
         if statusTask.serverOffsetAdvanced {
             metaData.errorCount = 0
         }
-        guard metaData.isFinished else { return }
+        guard metaData.isFinished else {
+            reportResume(of: metaData, reason: .serverOffset)
+            return
+        }
 
         _ = try? files.removeFileAndMetadata(metaData) // If removing the file fails here, then it will be attempted again at next startup.
         // The server has every byte, e.g. the connection dropped before the final PATCH's response arrived.
@@ -898,6 +934,10 @@ extension TUSClient: SchedulerDelegate {
         if canRetry {
             let retryTask = self.retryTask(after: task, metaData: metaData)
             let delay = retryPolicy.delay(beforeRetry: metaData.errorCount)
+            let attempt = metaData.errorCount
+            reportingQueue.async {
+                self.delegate?.willRetryUpload(id: metaData.id, attempt: attempt, delay: delay, error: error, context: metaData.context, client: self)
+            }
             if delay > 0 {
                 scheduler.addTask(task: retryTask, after: delay)
             } else {
